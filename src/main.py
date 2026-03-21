@@ -406,6 +406,7 @@ async def ws_speech():
 if __name__ == "__main__":
     import uvicorn
 
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
     logger.info("bootstrap v%s (deployed %s)", VERSION, DEPLOY_DATE)
     port = int(os.environ["PORT"])
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
