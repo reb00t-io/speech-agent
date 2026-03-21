@@ -422,6 +422,47 @@
       50%      { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.1); }
     }
 
+    /* ─── Audio Level Visualizer ────────────────────────────────────────────── */
+    .audio-viz {
+      display: none;
+      align-items: center;
+      gap: 3px;
+      height: 22px;
+      padding: 0 4px;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .audio-viz.is-active {
+      display: flex;
+    }
+
+    .audio-viz-bar {
+      flex: 1;
+      max-width: 4px;
+      min-height: 3px;
+      border-radius: 2px;
+      background: #e2e8f0;
+      transition: height 0.06s ease-out, background 0.12s;
+      align-self: center;
+    }
+
+    .audio-viz-bar.has-signal {
+      background: linear-gradient(0deg, #6366f1, #8b5cf6);
+    }
+
+    .audio-viz-bar.is-loud {
+      background: linear-gradient(0deg, #6366f1, #ef4444);
+    }
+
+    .audio-viz-label {
+      font-size: 0.7rem;
+      color: #94a3b8;
+      white-space: nowrap;
+      margin-right: 6px;
+      user-select: none;
+    }
+
     /* ─── Chat Toggle Button ────────────────────────────────────────────────── */
     .chat-toggle-btn {
       position: fixed;
@@ -608,6 +649,9 @@
             rows="1"
             aria-label="Chat message"
           ></textarea>
+          <div class="audio-viz" id="audio-viz">
+            <span class="audio-viz-label">Listening</span>
+          </div>
           <button class="chat-mic-btn" id="chat-mic-btn" aria-label="Toggle speech mode" title="Speech mode">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
               <rect x="5.5" y="1" width="5" height="9" rx="2.5" stroke="currentColor" stroke-width="1.25" fill="none"/>

@@ -474,6 +474,8 @@ async function send() {
 
 // ─── Speech mode ──────────────────────────────────────────────────────────────
 const micBtn = document.getElementById('chat-mic-btn');
+const audioViz = document.getElementById('audio-viz');
+const NUM_VIZ_BARS = 24;
 let speechSession = null;
 let speechUserBody = null;
 let speechUserText = '';
@@ -482,13 +484,48 @@ let speechAssistantBubble = null;
 let speechAssistantText = '';
 let speechCursor = null;
 
+// Build visualizer bars
+(function initVizBars() {
+    for (let i = 0; i < NUM_VIZ_BARS; i++) {
+        const bar = document.createElement('div');
+        bar.className = 'audio-viz-bar';
+        audioViz.appendChild(bar);
+    }
+})();
+
+const vizBars = audioViz.querySelectorAll('.audio-viz-bar');
+
+function updateViz(rms) {
+    // rms is 0..1 float; map to bar heights with some randomness for liveliness
+    const level = Math.min(1, rms * 5); // amplify — raw mic RMS is usually low
+    for (let i = 0; i < vizBars.length; i++) {
+        const bar = vizBars[i];
+        // Each bar gets a slightly different height for organic look
+        const variance = 0.3 + 0.7 * Math.random();
+        const h = Math.max(3, Math.round(level * variance * 22));
+        bar.style.height = `${h}px`;
+        bar.classList.toggle('has-signal', level > 0.05);
+        bar.classList.toggle('is-loud', level > 0.5 && variance > 0.7);
+    }
+}
+
+function resetViz() {
+    for (const bar of vizBars) {
+        bar.style.height = '3px';
+        bar.classList.remove('has-signal', 'is-loud');
+    }
+}
+
 function setSpeechActive(active) {
     micBtn.classList.toggle('is-active', active);
     input.disabled = active;
     sendBtn.disabled = active;
+    input.style.display = active ? 'none' : '';
+    audioViz.classList.toggle('is-active', active);
     if (active) {
-        input.placeholder = 'Listening…';
+        resetViz();
     } else {
+        resetViz();
         updateInputPlaceholder();
     }
 }
@@ -502,21 +539,29 @@ async function toggleSpeech() {
 
     speechSession = new SpeechSession({ sessionId, mode: currentMode });
     speechUserText = '';
+    speechUserBody = null;
     speechAssistantText = '';
-
-    // Create user bubble for live transcript
-    const userMsg = appendMessage('user', '');
-    speechUserBody = userMsg.body;
-    speechUserBody.textContent = '';
 
     speechSession.onSessionStart = (sid) => {
         sessionId = sid;
     };
 
-    speechSession.onTranscript = (text, isFinal) => {
+    speechSession.onTranscript = (text) => {
+        // Create a new user bubble if needed (first transcript or after a completed utterance)
+        if (!speechUserBody) {
+            speechUserText = '';
+            const userMsg = appendMessage('user', '');
+            speechUserBody = userMsg.body;
+            speechUserBody.textContent = '';
+        }
         speechUserText += (speechUserText ? ' ' : '') + text;
         speechUserBody.textContent = speechUserText;
         scrollToBottom();
+    };
+
+    speechSession.onTranscriptDone = () => {
+        // Current utterance is finalized — next transcript will create a new bubble
+        speechUserBody = null;
     };
 
     speechSession.onLLMToken = (token) => {
@@ -554,6 +599,10 @@ async function toggleSpeech() {
         speechAssistantText = partialResponse || speechAssistantText;
     };
 
+    speechSession.onAudioLevel = (rms) => {
+        updateViz(rms);
+    };
+
     speechSession.onError = (msg) => {
         console.error('Speech error:', msg);
     };
@@ -564,6 +613,10 @@ async function toggleSpeech() {
         speechCursor = null;
         speechAssistantBody = null;
         speechAssistantBubble = null;
+        // Remove empty trailing user bubble
+        if (speechUserBody && !speechUserBody.textContent.trim()) {
+            speechUserBody.closest('.msg')?.remove();
+        }
     };
 
     try {

@@ -293,6 +293,11 @@ def _load_system_prompt(mode: str) -> str:
     return template.replace("{{docs}}", docs)
 
 
+@app.route("/favicon.ico")
+async def favicon():
+    return "", 404
+
+
 @app.route("/login", methods=["GET", "POST"])
 async def login():
     if AUTH_MODE == "none":

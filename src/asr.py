@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import io
+import json
 import struct
 import logging
+import time
 
 import httpx
 
@@ -60,20 +62,38 @@ async def transcribe(
     if client is None:
         client = httpx.AsyncClient(timeout=30)
 
+    audio_duration_s = len(audio_pcm) / (SAMPLE_RATE * NUM_CHANNELS * BITS_PER_SAMPLE // 8)
+    t0 = time.monotonic()
     try:
         resp = await client.post(
-            f"{base_url}/v1/audio/transcriptions",
+            f"{base_url}/audio/transcriptions",
             files=files,
             data=data,
             headers=headers,
         )
         resp.raise_for_status()
-        return resp.text.strip()
+        body = resp.text.strip()
+        # Some endpoints return JSON even with response_format=text
+        if body.startswith("{"):
+            try:
+                text = json.loads(body).get("text", "").strip()
+            except (json.JSONDecodeError, AttributeError):
+                text = body
+        else:
+            text = body
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info(
+            "ASR: audio=%.1fs text=%d chars e2e=%.0fms result=%r",
+            audio_duration_s, len(text), elapsed_ms, text[:120],
+        )
+        return text
     except httpx.HTTPStatusError as exc:
-        logger.error("ASR request failed: %s %s", exc.response.status_code, exc.response.text[:200])
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.error("ASR request failed in %.0fms: %s %s", elapsed_ms, exc.response.status_code, exc.response.text[:200])
         raise
     except Exception:
-        logger.exception("ASR request error")
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.exception("ASR request error after %.0fms", elapsed_ms)
         raise
     finally:
         if should_close:

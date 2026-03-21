@@ -9,6 +9,8 @@ export class SpeechSession {
         this.stream = null;
         this.audioCtx = null;
         this.workletNode = null;
+        this.analyser = null;
+        this._levelRAF = null;
         this.active = false;
 
         // Callbacks
@@ -17,6 +19,8 @@ export class SpeechSession {
         this.onLLMToken = null;
         this.onLLMDone = null;
         this.onLLMCancelled = null;
+        this.onAudioLevel = null;  // (rms: number 0..1) called per worklet batch
+        this.onTranscriptDone = null;
         this.onError = null;
         this.onClose = null;
     }
@@ -78,11 +82,43 @@ export class SpeechSession {
 
         source.connect(this.workletNode);
         this.workletNode.connect(this.audioCtx.destination);
+
+        // Use AnalyserNode for reliable audio level metering
+        this.analyser = this.audioCtx.createAnalyser();
+        this.analyser.fftSize = 256;
+        source.connect(this.analyser);
+        this._startLevelMeter();
+    }
+
+    _startLevelMeter() {
+        const buf = new Uint8Array(this.analyser.frequencyBinCount);
+        const tick = () => {
+            if (!this.active || !this.analyser) return;
+            this.analyser.getByteTimeDomainData(buf);
+            // Compute RMS from time-domain data (byte values centered at 128)
+            let sumSq = 0;
+            for (let i = 0; i < buf.length; i++) {
+                const v = (buf[i] - 128) / 128;
+                sumSq += v * v;
+            }
+            const rms = Math.sqrt(sumSq / buf.length);
+            this.onAudioLevel?.(Math.min(1, rms));
+            this._levelRAF = requestAnimationFrame(tick);
+        };
+        this._levelRAF = requestAnimationFrame(tick);
+    }
+
+    _stopLevelMeter() {
+        if (this._levelRAF != null) {
+            cancelAnimationFrame(this._levelRAF);
+            this._levelRAF = null;
+        }
     }
 
     stop() {
         if (!this.active) return;
         this.active = false;
+        this._stopLevelMeter();
 
         // Send stop signal
         if (this.ws?.readyState === WebSocket.OPEN) {
@@ -90,9 +126,11 @@ export class SpeechSession {
         }
 
         // Cleanup mic
+        this.analyser?.disconnect();
         this.workletNode?.disconnect();
         this.stream?.getTracks().forEach((t) => t.stop());
         this.audioCtx?.close();
+        this.analyser = null;
         this.workletNode = null;
         this.stream = null;
         this.audioCtx = null;
@@ -121,7 +159,10 @@ export class SpeechSession {
                 this.onSessionStart?.(msg.session_id);
                 break;
             case 'transcript':
-                this.onTranscript?.(msg.text, msg.is_final);
+                this.onTranscript?.(msg.text);
+                break;
+            case 'transcript_done':
+                this.onTranscriptDone?.();
                 break;
             case 'llm_token':
                 this.onLLMToken?.(msg.token);

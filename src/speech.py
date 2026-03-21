@@ -96,7 +96,7 @@ async def _stream_llm(state: SpeechState) -> None:
                                 continue
                             payload = line[6:]
                             if payload == "[DONE]":
-                                return
+                                continue
                             try:
                                 chunk = json.loads(payload)
                             except json.JSONDecodeError:
@@ -110,10 +110,10 @@ async def _stream_llm(state: SpeechState) -> None:
                                 state.partial_llm_response += content
                                 await _send_json({"type": "llm_token", "token": content})
 
-        await _send_json({"type": "llm_done"})
         # Full response complete — add to message history
         state.messages.append({"role": "assistant", "content": state.partial_llm_response})
         state.partial_llm_response = ""
+        await _send_json({"type": "llm_done"})
 
     except asyncio.CancelledError:
         # Partial response preserved in state.partial_llm_response
@@ -130,8 +130,8 @@ async def _handle_pause(state: SpeechState) -> None:
     if not user_text:
         return
 
-    # Send final transcript marker
-    await _send_json({"type": "transcript", "text": user_text, "is_final": True})
+    # Send final marker (no text — frontend already has it from chunk transcripts)
+    await _send_json({"type": "transcript_done"})
 
     # Build messages for LLM
     if state.partial_llm_response:

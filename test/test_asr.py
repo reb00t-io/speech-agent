@@ -83,7 +83,7 @@ async def test_transcribe_sends_correct_request(mock_client):
     assert result == "hello world"
     mock_client.post.assert_awaited_once()
     call_args = mock_client.post.call_args
-    assert call_args[0][0] == "http://asr-server/v1/audio/transcriptions"
+    assert call_args[0][0] == "http://asr-server/audio/transcriptions"
     assert call_args[1]["data"]["model"] == "whisper-1"
     assert call_args[1]["data"]["response_format"] == "text"
     assert "Authorization" in call_args[1]["headers"]
@@ -104,6 +104,23 @@ async def test_transcribe_strips_whitespace(mock_client):
         client=mock_client,
     )
     assert result == "hello world"
+
+
+async def test_transcribe_parses_json_response(mock_client):
+    response = MagicMock()
+    response.status_code = 200
+    response.text = '{"text":" Test, test, test.","usage":{"type":"duration","seconds":3}}'
+    response.raise_for_status = MagicMock()
+    mock_client.post = AsyncMock(return_value=response)
+
+    result = await transcribe(
+        b"\x00" * 100,
+        base_url="http://asr-server",
+        api_key="",
+        model="whisper-1",
+        client=mock_client,
+    )
+    assert result == "Test, test, test."
 
 
 async def test_transcribe_no_api_key_omits_auth_header(mock_client):
