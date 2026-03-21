@@ -55,6 +55,27 @@ class AudioChunker:
         self.last_speech_time: float = 0.0
         self._pause_emitted = False
 
+    @staticmethod
+    def _find_speech_end(buf: bytearray) -> int:
+        """Find the byte offset where speech ends (start of trailing silence).
+
+        Scans backwards from the end of the buffer to find the last
+        non-silent window. Returns the offset just after that window,
+        so the emitted chunk contains all speech but minimal trailing silence.
+        """
+        length = len(buf)
+        step = SILENCE_WINDOW_BYTES
+        # Scan backwards in window-sized steps
+        pos = length
+        while pos - step >= 0:
+            window = bytes(buf[pos - step : pos])
+            if not is_silent(window):
+                # Found speech — include this window plus one extra for safety
+                return min(length, pos + step)
+            pos -= step
+        # Entire buffer is silent — return all of it
+        return length
+
     def feed(self, pcm_data: bytes, current_time: float) -> list[ChunkEvent]:
         """Feed raw PCM bytes and the current monotonic time. Returns events."""
         events: list[ChunkEvent] = []
@@ -72,8 +93,11 @@ class AudioChunker:
             # Check if the tail of the buffer is silent (good cut point)
             tail_window = bytes(self.buffer[-SILENCE_WINDOW_BYTES:]) if len(self.buffer) >= SILENCE_WINDOW_BYTES else bytes(self.buffer)
             if is_silent(tail_window, self.silence_threshold):
-                events.append(ChunkEvent(type="chunk", audio=bytes(self.buffer)))
-                self.buffer.clear()
+                # Find where speech ends — trim trailing silence to avoid
+                # the ASR seeing a word fragment at the boundary
+                cut = self._find_speech_end(self.buffer)
+                events.append(ChunkEvent(type="chunk", audio=bytes(self.buffer[:cut])))
+                self.buffer = bytearray(self.buffer[cut:])
 
         # Check for pause (0.4s silence after speech)
         if (

@@ -15,9 +15,11 @@ from quart import websocket
 try:
     from .asr import transcribe
     from .audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
+    from .audio_recording import AudioRecorder
 except ImportError:
     from asr import transcribe
     from audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
+    from audio_recording import AudioRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,7 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-oss-120b")
 ASR_MODEL = os.environ.get("ASR_MODEL", "")
 ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "")
+AUDIO_RECORDING_DIR = os.environ.get("AUDIO_RECORDING_DIR", "data/audio_recordings")
 
 logger.info("Speech module: LLM_BASE_URL=%s ASR_MODEL=%s LLM_MODEL=%s ASR_LANGUAGE=%s", LLM_BASE_URL, ASR_MODEL, LLM_MODEL, ASR_LANGUAGE or "auto")
 
@@ -41,6 +44,7 @@ class SpeechState:
         self.llm_task: asyncio.Task | None = None
         self.partial_llm_response: str = ""
         self.is_speaking: bool = False
+        self.recorder = AudioRecorder(AUDIO_RECORDING_DIR, session_id)
 
 
 async def _send_json(data: dict) -> None:
@@ -66,6 +70,7 @@ async def _transcribe_chunk(chunk_audio: bytes, state: SpeechState) -> None:
     """Send audio chunk to ASR and forward transcript to client."""
     if not _chunk_has_speech(chunk_audio):
         logger.info("Skipping silent chunk: %d bytes (%.1fs)", len(chunk_audio), len(chunk_audio) / 32000)
+        state.recorder.record_chunk(chunk_audio, "", skipped=True)
         return
     logger.info("Transcribing chunk: %d bytes (%.1fs audio)", len(chunk_audio), len(chunk_audio) / 32000)
     try:
@@ -76,11 +81,13 @@ async def _transcribe_chunk(chunk_audio: bytes, state: SpeechState) -> None:
             model=ASR_MODEL,
             language=ASR_LANGUAGE,
         )
+        state.recorder.record_chunk(chunk_audio, text)
         if text:
             state.transcript_parts.append(text)
             await _send_json({"type": "transcript", "text": text, "is_final": False})
     except Exception as exc:
         logger.error("ASR error: %s", exc)
+        state.recorder.record_chunk(chunk_audio, f"ERROR: {exc}")
         await _send_json({"type": "error", "message": f"ASR error: {exc}"})
 
 
@@ -220,6 +227,7 @@ async def handle_speech_ws(
 
             if isinstance(msg, bytes):
                 # Audio data
+                state.recorder.feed_audio(msg)
                 now = time.monotonic()
 
                 # If LLM is streaming and we get new audio with speech, cancel it
@@ -263,4 +271,8 @@ async def handle_speech_ws(
     except Exception:
         logger.exception("Speech WebSocket handler error")
     finally:
+        try:
+            state.recorder.finalize()
+        except Exception:
+            logger.exception("Failed to finalize audio recording")
         save_sessions()
