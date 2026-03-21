@@ -14,10 +14,10 @@ from quart import websocket
 
 try:
     from .asr import transcribe
-    from .audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS
+    from .audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
 except ImportError:
     from asr import transcribe
-    from audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS
+    from audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +46,20 @@ async def _send_json(data: dict) -> None:
     await websocket.send(json.dumps(data))
 
 
+def _chunk_has_speech(pcm: bytes) -> bool:
+    """Check if a chunk contains any speech by scanning windows."""
+    step = SILENCE_WINDOW_BYTES
+    for i in range(0, len(pcm) - step + 1, step):
+        if not is_silent(pcm[i : i + step], SILENCE_THRESHOLD_RMS):
+            return True
+    return False
+
+
 async def _transcribe_chunk(chunk_audio: bytes, state: SpeechState) -> None:
     """Send audio chunk to ASR and forward transcript to client."""
+    if not _chunk_has_speech(chunk_audio):
+        logger.info("Skipping silent chunk: %d bytes (%.1fs)", len(chunk_audio), len(chunk_audio) / 32000)
+        return
     logger.info("Transcribing chunk: %d bytes (%.1fs audio)", len(chunk_audio), len(chunk_audio) / 32000)
     try:
         text = await transcribe(
