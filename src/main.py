@@ -6,6 +6,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s", force=True)
+
 import httpx
 from quart import Quart, g, jsonify, redirect, render_template, request, session, url_for
 
@@ -295,7 +297,8 @@ def _load_system_prompt(mode: str) -> str:
 
 @app.route("/favicon.ico")
 async def favicon():
-    return "", 404
+    from quart import Response
+    return Response("", status=404)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -406,7 +409,6 @@ async def ws_speech():
 if __name__ == "__main__":
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
     logger.info("bootstrap v%s (deployed %s)", VERSION, DEPLOY_DATE)
     port = int(os.environ["PORT"])
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

@@ -14,10 +14,10 @@ from quart import websocket
 
 try:
     from .asr import transcribe
-    from .audio_chunking import AudioChunker, ChunkEvent
+    from .audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS
 except ImportError:
     from asr import transcribe
-    from audio_chunking import AudioChunker, ChunkEvent
+    from audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,8 @@ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-oss-120b")
 ASR_MODEL = os.environ.get("ASR_MODEL", "whisper-1")
+
+logger.info("Speech module: LLM_BASE_URL=%s ASR_MODEL=%s LLM_MODEL=%s", LLM_BASE_URL, ASR_MODEL, LLM_MODEL)
 
 
 class SpeechState:
@@ -46,6 +48,7 @@ async def _send_json(data: dict) -> None:
 
 async def _transcribe_chunk(chunk_audio: bytes, state: SpeechState) -> None:
     """Send audio chunk to ASR and forward transcript to client."""
+    logger.info("Transcribing chunk: %d bytes (%.1fs audio)", len(chunk_audio), len(chunk_audio) / 32000)
     try:
         text = await transcribe(
             chunk_audio,
@@ -127,6 +130,7 @@ async def _stream_llm(state: SpeechState) -> None:
 async def _handle_pause(state: SpeechState) -> None:
     """Called when a speech pause is detected — trigger LLM."""
     user_text = " ".join(state.transcript_parts).strip()
+    logger.info("Pause detected: transcript_parts=%d text=%r", len(state.transcript_parts), user_text[:100] if user_text else "")
     if not user_text:
         return
 
@@ -146,6 +150,7 @@ async def _handle_pause(state: SpeechState) -> None:
         state.messages.append({"role": "user", "content": user_text})
 
     state.transcript_parts.clear()
+    logger.info("Starting LLM stream: %d messages in history", len(state.messages))
     state.llm_task = asyncio.create_task(_stream_llm(state))
 
 
@@ -187,6 +192,7 @@ async def handle_speech_ws(
     state = SpeechState(session_id=session_id, messages=messages)
 
     await _send_json({"type": "session_start", "session_id": session_id})
+    logger.info("Speech WS connected: session=%s mode=%s", session_id, mode)
 
     try:
         while True:
@@ -198,16 +204,18 @@ async def handle_speech_ws(
 
                 # If LLM is streaming and we get new audio with speech, cancel it
                 if state.llm_task and not state.llm_task.done():
-                    from .audio_chunking import is_silent, SILENCE_THRESHOLD_RMS
                     if not is_silent(msg, SILENCE_THRESHOLD_RMS):
                         await _cancel_llm(state)
 
-                events = state.chunker.feed(msg, now)
-                for event in events:
-                    if event.type == "chunk" and event.audio:
-                        await _transcribe_chunk(event.audio, state)
-                    elif event.type == "pause":
-                        await _handle_pause(state)
+                try:
+                    events = state.chunker.feed(msg, now)
+                    for event in events:
+                        if event.type == "chunk" and event.audio:
+                            await _transcribe_chunk(event.audio, state)
+                        elif event.type == "pause":
+                            await _handle_pause(state)
+                except Exception:
+                    logger.exception("Error processing audio frame")
 
             elif isinstance(msg, str):
                 try:
@@ -230,5 +238,9 @@ async def handle_speech_ws(
                         except asyncio.CancelledError:
                             pass
                     break
+            else:
+                logger.warning("Unexpected WS message type: %s %r", type(msg).__name__, msg[:50] if isinstance(msg, (bytes, str)) else msg)
+    except Exception:
+        logger.exception("Speech WebSocket handler error")
     finally:
         save_sessions()
