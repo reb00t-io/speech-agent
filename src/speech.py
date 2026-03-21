@@ -24,9 +24,10 @@ logger = logging.getLogger(__name__)
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-oss-120b")
-ASR_MODEL = os.environ.get("ASR_MODEL", "whisper-1")
+ASR_MODEL = os.environ.get("ASR_MODEL", "")
+ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "")
 
-logger.info("Speech module: LLM_BASE_URL=%s ASR_MODEL=%s LLM_MODEL=%s", LLM_BASE_URL, ASR_MODEL, LLM_MODEL)
+logger.info("Speech module: LLM_BASE_URL=%s ASR_MODEL=%s LLM_MODEL=%s ASR_LANGUAGE=%s", LLM_BASE_URL, ASR_MODEL, LLM_MODEL, ASR_LANGUAGE or "auto")
 
 
 class SpeechState:
@@ -46,12 +47,18 @@ async def _send_json(data: dict) -> None:
     await websocket.send(json.dumps(data))
 
 
+MIN_SPEECH_WINDOWS = 5  # at least 5 × 50ms = 250ms of non-silent audio
+
+
 def _chunk_has_speech(pcm: bytes) -> bool:
-    """Check if a chunk contains any speech by scanning windows."""
+    """Check if a chunk contains enough speech (not just mic noise)."""
     step = SILENCE_WINDOW_BYTES
+    loud_count = 0
     for i in range(0, len(pcm) - step + 1, step):
         if not is_silent(pcm[i : i + step], SILENCE_THRESHOLD_RMS):
-            return True
+            loud_count += 1
+            if loud_count >= MIN_SPEECH_WINDOWS:
+                return True
     return False
 
 
@@ -67,6 +74,7 @@ async def _transcribe_chunk(chunk_audio: bytes, state: SpeechState) -> None:
             base_url=LLM_BASE_URL,
             api_key=LLM_API_KEY,
             model=ASR_MODEL,
+            language=ASR_LANGUAGE,
         )
         if text:
             state.transcript_parts.append(text)

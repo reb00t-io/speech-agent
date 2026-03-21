@@ -148,7 +148,7 @@ async def test_e2e_hello_world(ws_client):
     gets transcribed, pauses trigger LLM."""
     asr_call_count = 0
 
-    async def mock_asr(audio_pcm, *, base_url, api_key, model):
+    async def mock_asr(audio_pcm, *, base_url, api_key, model, language=""):
         nonlocal asr_call_count
         asr_call_count += 1
         return "hello world"
@@ -229,7 +229,7 @@ async def test_e2e_multiple_utterances(ws_client):
     """Multiple speech segments separated by pauses should produce multiple transcripts."""
     call_index = 0
 
-    async def mock_asr(audio_pcm, *, base_url, api_key, model):
+    async def mock_asr(audio_pcm, *, base_url, api_key, model, language=""):
         nonlocal call_index
         call_index += 1
         return f"utterance {call_index}"
@@ -274,7 +274,7 @@ async def test_e2e_interruption_and_continuation(ws_client):
     """Simulate: user speaks → pause → LLM starts → user speaks again → LLM cancelled → pause → LLM continues."""
     asr_calls = []
 
-    async def mock_asr(audio_pcm, *, base_url, api_key, model):
+    async def mock_asr(audio_pcm, *, base_url, api_key, model, language=""):
         asr_calls.append(len(audio_pcm))
         return "test speech"
 

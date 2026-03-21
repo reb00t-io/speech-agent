@@ -44,6 +44,7 @@ async def transcribe(
     base_url: str,
     api_key: str,
     model: str,
+    language: str = "",
     client: httpx.AsyncClient | None = None,
 ) -> str:
     """Transcribe raw PCM audio via OpenAI-compatible ASR endpoint.
@@ -54,6 +55,8 @@ async def transcribe(
 
     files = {"file": ("audio.wav", io.BytesIO(wav_bytes), "audio/wav")}
     data = {"model": model, "response_format": "text"}
+    if language:
+        data["language"] = language
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
