@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "speech-agent"
+version = "0.1.0"
+description = "TODO."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "Marko Rosenmüller" }]
+keywords = []
+dependencies = [
+  "aiohttp>=3.11",
+  "beautifulsoup4>=4.12",
+  "quart>=0.20",
+  "uvicorn==0.40.0",
+  "httpx>=0.28",
+]
+
+[project.scripts]
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+exclude = ["tests*", "docs*"]
+
+[project.optional-dependencies]
+dev = [
+  "prompt-toolkit>=3.0",
+  "pytest>=8.2",
+  "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

@@ -2,11 +2,49 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
-  build:
+  build_test_deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - run: echo "Hello, world!"
+      - uses: actions/checkout@v4
+      - run: grep '^export ' .envrc | sed -e 's/^export //' -e 's/="\(.*\)"/=\1/' >> "$GITHUB_ENV"
+      - run: ./scripts/build.sh linux/amd64
+      - run: ./test/e2e.sh
+        env:
+          SKIP_DOCKER_BUILD: 1
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          API_KEY: ${{ secrets.API_KEY }}
+      - name: Set up SSH
+        id: ssh
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "[test.k3rnel-pan1c.com]:2223 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFRgPzEkiLX8QQDkMocexiiZkiw4nOwGVqmKycBZIr3o" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          if [ -z "$DEPLOY_SSH_KEY" ]; then
+            echo "::error::DEPLOY_SSH_KEY secret is not set. Add it in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          eval "$(ssh-agent -a "$SSH_AUTH_SOCK")"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          echo "$DEPLOY_SSH_KEY" | ssh-add -
+        env:
+          SSH_AUTH_SOCK: ${{ runner.temp }}/ssh-agent.sock
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      - run: ./scripts/deploy.sh
+        env:
+          SSH_AUTH_SOCK: ${{ runner.temp }}/ssh-agent.sock
+          SKIP_DOCKER_BUILD: 1
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          API_KEY: ${{ secrets.API_KEY }}
+          AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
+      - name: Kill SSH agent
+        if: always() && steps.ssh.outcome == 'success'
+        run: ssh-agent -k
+        env:
+          SSH_AUTH_SOCK: ${{ runner.temp }}/ssh-agent.sock

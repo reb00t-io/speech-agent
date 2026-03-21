@@ -1,0 +1,5 @@
+Update AGENTS.md so it conforms to AGENTS_STRUCTURE.md.
+- Only edit AGENTS.md (do not touch other files).
+- Replace outdated content and add new information as needed.
+- Keep it concise and bullet-based. If needed, make it more concise.
+- In the end create a PR with the changes and add a comment summarizing the updates.
