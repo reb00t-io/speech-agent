@@ -479,6 +479,7 @@ const NUM_VIZ_BARS = 24;
 let speechSession = null;
 let speechUserBody = null;
 let speechUserText = '';
+let speechUserParts = [];
 let speechAssistantBody = null;
 let speechAssistantBubble = null;
 let speechAssistantText = '';
@@ -550,11 +551,22 @@ async function toggleSpeech() {
         // Create a new user bubble if needed (first transcript or after a completed utterance)
         if (!speechUserBody) {
             speechUserText = '';
+            speechUserParts = [];
             const userMsg = appendMessage('user', '');
             speechUserBody = userMsg.body;
             speechUserBody.textContent = '';
         }
-        speechUserText += (speechUserText ? ' ' : '') + text;
+        speechUserParts.push(text);
+        speechUserText = speechUserParts.join(' ');
+        speechUserBody.textContent = speechUserText;
+        scrollToBottom();
+    };
+
+    speechSession.onTranscriptReplace = (replaceLast, text) => {
+        if (!speechUserBody || !speechUserParts.length) return;
+        // Remove the last N parts and replace with the merged text
+        speechUserParts.splice(-replaceLast, replaceLast, text);
+        speechUserText = speechUserParts.join(' ');
         speechUserBody.textContent = speechUserText;
         scrollToBottom();
     };
@@ -562,6 +574,7 @@ async function toggleSpeech() {
     speechSession.onTranscriptDone = () => {
         // Current utterance is finalized — next transcript will create a new bubble
         speechUserBody = null;
+        speechUserParts = [];
     };
 
     speechSession.onLLMToken = (token) => {

@@ -20,9 +20,14 @@ export class SpeechSession {
         this.onLLMDone = null;
         this.onLLMCancelled = null;
         this.onAudioLevel = null;  // (rms: number 0..1) called per worklet batch
+        this.onTranscriptReplace = null; // (replaceLast: number, text: string)
         this.onTranscriptDone = null;
         this.onError = null;
         this.onClose = null;
+
+        // TTS audio playback queue
+        this._ttsQueue = [];
+        this._ttsPlaying = false;
     }
 
     async start() {
@@ -119,6 +124,7 @@ export class SpeechSession {
         if (!this.active) return;
         this.active = false;
         this._stopLevelMeter();
+        this._stopTTS();
 
         // Send stop signal
         if (this.ws?.readyState === WebSocket.OPEN) {
@@ -161,6 +167,9 @@ export class SpeechSession {
             case 'transcript':
                 this.onTranscript?.(msg.text);
                 break;
+            case 'transcript_replace':
+                this.onTranscriptReplace?.(msg.replace_last, msg.text);
+                break;
             case 'transcript_done':
                 this.onTranscriptDone?.();
                 break;
@@ -171,11 +180,57 @@ export class SpeechSession {
                 this.onLLMDone?.();
                 break;
             case 'llm_cancelled':
+                this._stopTTS();
                 this.onLLMCancelled?.(msg.partial_response);
+                break;
+            case 'tts_audio':
+                this._enqueueTTS(msg.audio_base64);
                 break;
             case 'error':
                 this.onError?.(msg.message);
                 break;
         }
+    }
+
+    _enqueueTTS(base64Audio) {
+        this._ttsQueue.push(base64Audio);
+        if (!this._ttsPlaying) {
+            this._playNextTTS();
+        }
+    }
+
+    async _playNextTTS() {
+        if (!this._ttsQueue.length) {
+            this._ttsPlaying = false;
+            return;
+        }
+        this._ttsPlaying = true;
+        const base64 = this._ttsQueue.shift();
+        try {
+            const binary = atob(base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            // Use a dedicated AudioContext for playback (not the mic one)
+            const ctx = new AudioContext();
+            const audioBuffer = await ctx.decodeAudioData(bytes.buffer);
+            const source = ctx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(ctx.destination);
+            source.onended = () => {
+                ctx.close();
+                this._playNextTTS();
+            };
+            source.start(0);
+        } catch (err) {
+            console.error('TTS playback error:', err);
+            this._playNextTTS();
+        }
+    }
+
+    _stopTTS() {
+        this._ttsQueue.length = 0;
+        this._ttsPlaying = false;
     }
 }

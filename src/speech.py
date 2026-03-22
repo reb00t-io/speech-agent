@@ -16,10 +16,12 @@ try:
     from .asr import transcribe
     from .audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from .audio_recording import AudioRecorder
+    from .tts import split_sentences, synthesize as tts_synthesize, wav_to_base64
 except ImportError:
     from asr import transcribe
     from audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from audio_recording import AudioRecorder
+    from tts import split_sentences, synthesize as tts_synthesize, wav_to_base64
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,9 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-oss-120b")
 ASR_MODEL = os.environ.get("ASR_MODEL", "")
 ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "")
 AUDIO_RECORDING_DIR = os.environ.get("AUDIO_RECORDING_DIR", "data/audio_recordings")
+TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "")
+TTS_LANGUAGE = os.environ.get("TTS_LANGUAGE", os.environ.get("ASR_LANGUAGE", "en"))
+TTS_SPEAKER = int(os.environ.get("TTS_SPEAKER", "0"))
 
 logger.info("Speech module: LLM_BASE_URL=%s ASR_MODEL=%s LLM_MODEL=%s ASR_LANGUAGE=%s", LLM_BASE_URL, ASR_MODEL, LLM_MODEL, ASR_LANGUAGE or "auto")
 
@@ -45,6 +50,9 @@ class SpeechState:
         self.partial_llm_response: str = ""
         self.is_speaking: bool = False
         self.recorder = AudioRecorder(AUDIO_RECORDING_DIR, session_id)
+        # For short-chunk merging: track the last two transcribed chunks
+        self.prev_chunk_audio: bytes | None = None  # second-to-last
+        self.last_chunk_audio: bytes | None = None   # most recent
 
 
 async def _send_json(data: dict) -> None:
@@ -52,6 +60,7 @@ async def _send_json(data: dict) -> None:
 
 
 MIN_SPEECH_WINDOWS = 5  # at least 5 × 50ms = 250ms of non-silent audio
+MERGE_THRESHOLD_BYTES = int(16000 * 2 * 1.0)  # 1 second of audio
 
 
 def _chunk_has_speech(pcm: bytes) -> bool:
@@ -66,6 +75,17 @@ def _chunk_has_speech(pcm: bytes) -> bool:
     return False
 
 
+async def _do_transcribe(chunk_audio: bytes) -> str:
+    """Run ASR on audio and return text (may be empty)."""
+    return await transcribe(
+        chunk_audio,
+        base_url=LLM_BASE_URL,
+        api_key=LLM_API_KEY,
+        model=ASR_MODEL,
+        language=ASR_LANGUAGE,
+    )
+
+
 async def _transcribe_chunk(chunk_audio: bytes, state: SpeechState) -> None:
     """Send audio chunk to ASR and forward transcript to client."""
     if not _chunk_has_speech(chunk_audio):
@@ -74,16 +94,12 @@ async def _transcribe_chunk(chunk_audio: bytes, state: SpeechState) -> None:
         return
     logger.info("Transcribing chunk: %d bytes (%.1fs audio)", len(chunk_audio), len(chunk_audio) / 32000)
     try:
-        text = await transcribe(
-            chunk_audio,
-            base_url=LLM_BASE_URL,
-            api_key=LLM_API_KEY,
-            model=ASR_MODEL,
-            language=ASR_LANGUAGE,
-        )
+        text = await _do_transcribe(chunk_audio)
         state.recorder.record_chunk(chunk_audio, text)
         if text:
             state.transcript_parts.append(text)
+            state.prev_chunk_audio = state.last_chunk_audio
+            state.last_chunk_audio = chunk_audio
             await _send_json({"type": "transcript", "text": text, "is_final": False})
     except Exception as exc:
         logger.error("ASR error: %s", exc)
@@ -91,8 +107,68 @@ async def _transcribe_chunk(chunk_audio: bytes, state: SpeechState) -> None:
         await _send_json({"type": "error", "message": f"ASR error: {exc}"})
 
 
+async def _maybe_merge_short_chunk(state: SpeechState) -> None:
+    """If the last chunk before a pause is short and there was a previous chunk,
+    merge them and re-transcribe to get a better result."""
+    if state.last_chunk_audio is None or state.prev_chunk_audio is None:
+        return
+    if len(state.last_chunk_audio) >= MERGE_THRESHOLD_BYTES:
+        return
+    if len(state.transcript_parts) < 2:
+        return
+
+    merged_audio = state.prev_chunk_audio + state.last_chunk_audio
+    logger.info(
+        "Merging short chunk (%.1fs) with previous (%.1fs) → %.1fs",
+        len(state.last_chunk_audio) / 32000,
+        len(state.prev_chunk_audio) / 32000,
+        len(merged_audio) / 32000,
+    )
+    try:
+        merged_text = await _do_transcribe(merged_audio)
+        state.recorder.record_chunk(merged_audio, f"[merged] {merged_text}")
+        if merged_text:
+            old_prev = state.transcript_parts[-2]
+            old_last = state.transcript_parts[-1]
+            state.transcript_parts[-2:] = [merged_text]
+            logger.info(
+                "Merged transcript: %r + %r → %r",
+                old_prev, old_last, merged_text,
+            )
+            await _send_json({
+                "type": "transcript_replace",
+                "replace_last": 2,
+                "text": merged_text,
+            })
+    except Exception as exc:
+        logger.error("Merge transcription error: %s", exc)
+
+
+async def _tts_sentence(text: str, index: int) -> None:
+    """Synthesize a sentence and send audio to the client."""
+    try:
+        wav_bytes = await tts_synthesize(
+            text,
+            base_url=TTS_BASE_URL,
+            language=TTS_LANGUAGE,
+            speaker=TTS_SPEAKER,
+        )
+        await _send_json({
+            "type": "tts_audio",
+            "index": index,
+            "audio_base64": wav_to_base64(wav_bytes),
+        })
+    except Exception as exc:
+        logger.error("TTS error for sentence %d: %s", index, exc)
+
+
 async def _stream_llm(state: SpeechState) -> None:
     """Stream LLM response, accumulating partial_llm_response."""
+    tts_enabled = bool(TTS_BASE_URL)
+    tts_tasks: list[asyncio.Task] = []
+    sentence_buf = ""
+    sentence_index = 0
+
     try:
         body = {
             "model": LLM_MODEL,
@@ -140,13 +216,37 @@ async def _stream_llm(state: SpeechState) -> None:
                                 state.partial_llm_response += content
                                 await _send_json({"type": "llm_token", "token": content})
 
+                                # TTS: accumulate and send complete sentences
+                                if tts_enabled:
+                                    sentence_buf += content
+                                    sentences = split_sentences(sentence_buf)
+                                    if len(sentences) > 1:
+                                        # All but the last are complete
+                                        for s in sentences[:-1]:
+                                            task = asyncio.create_task(_tts_sentence(s, sentence_index))
+                                            tts_tasks.append(task)
+                                            sentence_index += 1
+                                        sentence_buf = sentences[-1]
+
+        # TTS: flush remaining text
+        if tts_enabled and sentence_buf.strip():
+            task = asyncio.create_task(_tts_sentence(sentence_buf.strip(), sentence_index))
+            tts_tasks.append(task)
+
+        # Wait for all TTS tasks to finish
+        if tts_tasks:
+            await asyncio.gather(*tts_tasks, return_exceptions=True)
+
         # Full response complete — add to message history
         state.messages.append({"role": "assistant", "content": state.partial_llm_response})
         state.partial_llm_response = ""
         await _send_json({"type": "llm_done"})
 
     except asyncio.CancelledError:
-        # Partial response preserved in state.partial_llm_response
+        # Cancel pending TTS tasks
+        for task in tts_tasks:
+            if not task.done():
+                task.cancel()
         logger.info("LLM streaming cancelled (user resumed speaking)")
         raise
     except Exception as exc:
@@ -156,6 +256,9 @@ async def _stream_llm(state: SpeechState) -> None:
 
 async def _handle_pause(state: SpeechState) -> None:
     """Called when a speech pause is detected — trigger LLM."""
+    # Try merging a short trailing chunk with the previous one
+    await _maybe_merge_short_chunk(state)
+
     user_text = " ".join(state.transcript_parts).strip()
     logger.info("Pause detected: transcript_parts=%d text=%r", len(state.transcript_parts), user_text[:100] if user_text else "")
     if not user_text:
@@ -163,6 +266,10 @@ async def _handle_pause(state: SpeechState) -> None:
 
     # Send final marker (no text — frontend already has it from chunk transcripts)
     await _send_json({"type": "transcript_done"})
+
+    # Reset chunk tracking for next utterance
+    state.prev_chunk_audio = None
+    state.last_chunk_audio = None
 
     # Build messages for LLM
     if state.partial_llm_response:

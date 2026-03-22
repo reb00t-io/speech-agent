@@ -68,7 +68,8 @@ def chunk_audio(pcm: bytes, chunk_size: int = 8192) -> list[bytes]:
 # ─── Fixtures ────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def reset_sessions():
+def reset_sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.speech.AUDIO_RECORDING_DIR", str(tmp_path / "recordings"))
     sessions.clear()
     session_modes.clear()
     last_session_ids.clear()
