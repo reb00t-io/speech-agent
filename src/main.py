@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import hashlib
 import json
@@ -174,7 +175,8 @@ async def log_client_response(response):
         response.response = LoggedResponseBody(response.response, request_id)
         return response
 
-    response_body = await response.get_data(as_text=True)
+    result = response.get_data(as_text=True)
+    response_body = (await result) if asyncio.iscoroutine(result) else result
     body, body_truncated = _truncate_request_log_text(response_body)
     _append_request_log(
         {

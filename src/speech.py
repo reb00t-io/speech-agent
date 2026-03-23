@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
 import json
 import logging
 import os
@@ -16,11 +15,13 @@ try:
     from .asr import transcribe
     from .audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from .audio_recording import AudioRecorder
+    from .dual_llm import dual_stream
     from .tts import split_sentences, synthesize as tts_synthesize, wav_to_base64
 except ImportError:
     from asr import transcribe
     from audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from audio_recording import AudioRecorder
+    from dual_llm import dual_stream
     from tts import split_sentences, synthesize as tts_synthesize, wav_to_base64
 
 logger = logging.getLogger(__name__)
@@ -163,70 +164,32 @@ async def _tts_sentence(text: str, index: int) -> None:
 
 
 async def _stream_llm(state: SpeechState) -> None:
-    """Stream LLM response, accumulating partial_llm_response."""
+    """Stream LLM response via dual-LLM system, with optional TTS."""
     tts_enabled = bool(TTS_BASE_URL)
     tts_tasks: list[asyncio.Task] = []
     sentence_buf = ""
     sentence_index = 0
 
     try:
-        body = {
-            "model": LLM_MODEL,
-            "stream": True,
-            "messages": list(state.messages),
-        }
-        decoder = codecs.getincrementaldecoder("utf-8")()
-        text_buf = ""
+        async for token in dual_stream(
+            messages=list(state.messages),
+            model=LLM_MODEL,
+            base_url=LLM_BASE_URL,
+            api_key=LLM_API_KEY,
+        ):
+            state.partial_llm_response += token
+            await _send_json({"type": "llm_token", "token": token})
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            async with client.stream(
-                "POST",
-                f"{LLM_BASE_URL}/chat/completions",
-                headers={
-                    "Accept": "text/event-stream",
-                    "Accept-Encoding": "identity",
-                    "Authorization": f"Bearer {LLM_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            ) as resp:
-                resp.raise_for_status()
-                async for raw_chunk in resp.aiter_raw():
-                    if not raw_chunk:
-                        continue
-                    text_buf += decoder.decode(raw_chunk)
-                    while "\n\n" in text_buf:
-                        event, text_buf = text_buf.split("\n\n", 1)
-                        for line in event.splitlines():
-                            if not line.startswith("data: "):
-                                continue
-                            payload = line[6:]
-                            if payload == "[DONE]":
-                                continue
-                            try:
-                                chunk = json.loads(payload)
-                            except json.JSONDecodeError:
-                                continue
-                            choices = chunk.get("choices") or []
-                            if not choices:
-                                continue
-                            delta = choices[0].get("delta") or {}
-                            content = delta.get("content") or ""
-                            if content:
-                                state.partial_llm_response += content
-                                await _send_json({"type": "llm_token", "token": content})
-
-                                # TTS: accumulate and send complete sentences
-                                if tts_enabled:
-                                    sentence_buf += content
-                                    sentences = split_sentences(sentence_buf)
-                                    if len(sentences) > 1:
-                                        # All but the last are complete
-                                        for s in sentences[:-1]:
-                                            task = asyncio.create_task(_tts_sentence(s, sentence_index))
-                                            tts_tasks.append(task)
-                                            sentence_index += 1
-                                        sentence_buf = sentences[-1]
+            # TTS: accumulate and send complete sentences
+            if tts_enabled:
+                sentence_buf += token
+                sentences = split_sentences(sentence_buf)
+                if len(sentences) > 1:
+                    for s in sentences[:-1]:
+                        task = asyncio.create_task(_tts_sentence(s, sentence_index))
+                        tts_tasks.append(task)
+                        sentence_index += 1
+                    sentence_buf = sentences[-1]
 
         # TTS: flush remaining text
         if tts_enabled and sentence_buf.strip():
@@ -243,7 +206,6 @@ async def _stream_llm(state: SpeechState) -> None:
         await _send_json({"type": "llm_done"})
 
     except asyncio.CancelledError:
-        # Cancel pending TTS tasks
         for task in tts_tasks:
             if not task.done():
                 task.cancel()
