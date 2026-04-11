@@ -28,6 +28,9 @@ export class SpeechSession {
         // TTS audio playback queue
         this._ttsQueue = [];
         this._ttsPlaying = false;
+        this._ttsSource = null;
+        this._ttsCtx = null;
+        this.onTTSPlaybackChange = null; // (playing: boolean) called when TTS starts/stops
     }
 
     async start() {
@@ -202,9 +205,15 @@ export class SpeechSession {
     async _playNextTTS() {
         if (!this._ttsQueue.length) {
             this._ttsPlaying = false;
+            this._ttsSource = null;
+            this._ttsCtx = null;
+            this.onTTSPlaybackChange?.(false);
             return;
         }
+        const wasPlaying = this._ttsPlaying;
         this._ttsPlaying = true;
+        if (!wasPlaying) this.onTTSPlaybackChange?.(true);
+
         const base64 = this._ttsQueue.shift();
         try {
             const binary = atob(base64);
@@ -218,19 +227,31 @@ export class SpeechSession {
             const source = ctx.createBufferSource();
             source.buffer = audioBuffer;
             source.connect(ctx.destination);
+            this._ttsCtx = ctx;
+            this._ttsSource = source;
             source.onended = () => {
                 ctx.close();
+                this._ttsSource = null;
+                this._ttsCtx = null;
                 this._playNextTTS();
             };
             source.start(0);
         } catch (err) {
             console.error('TTS playback error:', err);
+            this._ttsSource = null;
+            this._ttsCtx = null;
             this._playNextTTS();
         }
     }
 
     _stopTTS() {
         this._ttsQueue.length = 0;
+        const wasPlaying = this._ttsPlaying;
         this._ttsPlaying = false;
+        try { this._ttsSource?.stop(); } catch { /* ignore */ }
+        try { this._ttsCtx?.close(); } catch { /* ignore */ }
+        this._ttsSource = null;
+        this._ttsCtx = null;
+        if (wasPlaying) this.onTTSPlaybackChange?.(false);
     }
 }

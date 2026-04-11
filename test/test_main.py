@@ -29,10 +29,23 @@ def _sse(*tokens: str) -> list[bytes]:
     return chunks
 
 
-def mock_llm(chunks: list[bytes] | None = None):
-    """Patch httpx.AsyncClient to stream the given raw SSE byte chunks."""
+def mock_llm(chunks: list[bytes] | None = None, tokens: tuple[str, ...] | None = None):
+    """Patch both httpx.AsyncClient and dual_stream for text chat tests.
+
+    Fresh prompts go through dual_stream; tool continuations go through httpx.
+    """
+    if tokens is None and chunks is None:
+        tokens = ("Hi", " there")
+    if tokens is None:
+        # Extract tokens from SSE chunks
+        tokens = tuple(
+            json.loads(line[6:]).get("choices", [{}])[0].get("delta", {}).get("content", "")
+            for chunk in chunks
+            for line in chunk.decode("utf-8", errors="replace").strip().split("\n")
+            if line.startswith("data: ") and line[6:] != "[DONE]" and json.loads(line[6:]).get("choices", [{}])[0].get("delta", {}).get("content")
+        )
     if chunks is None:
-        chunks = _sse("Hi", " there")
+        chunks = _sse(*tokens)
 
     async def aiter_raw():
         for chunk in chunks:
@@ -51,11 +64,30 @@ def mock_llm(chunks: list[bytes] | None = None):
         client.stream = _stream
         yield client
 
-    return patch("src.main.httpx.AsyncClient", _client)
+    async def _fake_dual_stream(**kwargs):
+        for t in tokens:
+            yield t
+
+    httpx_patch = patch("src.main.httpx.AsyncClient", _client)
+    dual_patch = patch("src.streaming.dual_stream", _fake_dual_stream)
+
+    class _Combined:
+        def __enter__(self):
+            self._h = httpx_patch.__enter__()
+            self._d = dual_patch.__enter__()
+            return self._h
+        def __exit__(self, *args):
+            dual_patch.__exit__(*args)
+            httpx_patch.__exit__(*args)
+    return _Combined()
 
 
 def mock_llm_rounds(rounds: list[list[bytes]], *, capture_bodies: list[dict] | None = None):
-    """Patch httpx.AsyncClient for multiple streamed completion rounds."""
+    """Patch httpx.AsyncClient for multiple streamed completion rounds.
+
+    Also disables the dual-LLM path so tool-calling tests go through
+    the standard generate_stream pipeline.
+    """
     round_iter = iter(rounds)
 
     @asynccontextmanager
@@ -81,7 +113,19 @@ def mock_llm_rounds(rounds: list[list[bytes]], *, capture_bodies: list[dict] | N
         client.stream = _stream
         yield client
 
-    return patch("src.main.httpx.AsyncClient", _client)
+    httpx_patch = patch("src.main.httpx.AsyncClient", _client)
+    # Disable dual-LLM so all rounds go through generate_stream
+    dual_patch = patch("src.streaming.generate_dual_stream", None)
+
+    class _Combined:
+        def __enter__(self):
+            self._h = httpx_patch.__enter__()
+            self._d = dual_patch.__enter__()
+            return self._h
+        def __exit__(self, *args):
+            dual_patch.__exit__(*args)
+            httpx_patch.__exit__(*args)
+    return _Combined()
 
 
 # ─── Fixtures ─────────────────────────────────────────────────────────────────

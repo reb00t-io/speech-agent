@@ -8,6 +8,9 @@ services:
       - LLM_MODEL=${LLM_MODEL}
       - ASR_MODEL=${ASR_MODEL}
       - API_KEY=${API_KEY}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - TTS_MODEL=${TTS_MODEL}
+      - TTS_VOICE=${TTS_VOICE}
       - SESSIONS_PATH=/data/sessions.json
     ports:
       - "${PORT}:${PORT}"

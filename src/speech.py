@@ -5,21 +5,21 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import time
 
-import httpx
 from quart import websocket
 
 try:
     from .asr import transcribe
-    from .audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
+    from .audio_chunking import AudioChunker, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from .audio_recording import AudioRecorder
     from .dual_llm import dual_stream
     from .tts import split_sentences, synthesize as tts_synthesize, wav_to_base64
 except ImportError:
     from asr import transcribe
-    from audio_chunking import AudioChunker, ChunkEvent, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
+    from audio_chunking import AudioChunker, is_silent, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from audio_recording import AudioRecorder
     from dual_llm import dual_stream
     from tts import split_sentences, synthesize as tts_synthesize, wav_to_base64
@@ -32,9 +32,9 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-oss-120b")
 ASR_MODEL = os.environ.get("ASR_MODEL", "")
 ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "")
 AUDIO_RECORDING_DIR = os.environ.get("AUDIO_RECORDING_DIR", "data/audio_recordings")
-TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "")
-TTS_LANGUAGE = os.environ.get("TTS_LANGUAGE", os.environ.get("ASR_LANGUAGE", "en"))
-TTS_SPEAKER = int(os.environ.get("TTS_SPEAKER", "0"))
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
+TTS_MODEL = os.environ.get("TTS_MODEL", "voxtral-mini-tts-2603")
+TTS_VOICE = os.environ.get("TTS_VOICE", "en_paul_neutral")
 
 logger.info("Speech module: LLM_BASE_URL=%s ASR_MODEL=%s LLM_MODEL=%s ASR_LANGUAGE=%s", LLM_BASE_URL, ASR_MODEL, LLM_MODEL, ASR_LANGUAGE or "auto")
 
@@ -150,9 +150,9 @@ async def _tts_sentence(text: str, index: int) -> None:
     try:
         wav_bytes = await tts_synthesize(
             text,
-            base_url=TTS_BASE_URL,
-            language=TTS_LANGUAGE,
-            speaker=TTS_SPEAKER,
+            api_key=MISTRAL_API_KEY,
+            model=TTS_MODEL,
+            voice=TTS_VOICE,
         )
         await _send_json({
             "type": "tts_audio",
@@ -165,7 +165,7 @@ async def _tts_sentence(text: str, index: int) -> None:
 
 async def _stream_llm(state: SpeechState) -> None:
     """Stream LLM response via dual-LLM system, with optional TTS."""
-    tts_enabled = bool(TTS_BASE_URL)
+    tts_enabled = bool(MISTRAL_API_KEY)
     tts_tasks: list[asyncio.Task] = []
     sentence_buf = ""
     sentence_index = 0
@@ -223,7 +223,11 @@ async def _handle_pause(state: SpeechState) -> None:
 
     user_text = " ".join(state.transcript_parts).strip()
     logger.info("Pause detected: transcript_parts=%d text=%r", len(state.transcript_parts), user_text[:100] if user_text else "")
-    if not user_text:
+    # Ignore empty or noise-only transcripts (e.g. ".", "...", "♪", emoji)
+    if not user_text or not re.sub(r"[\s.\-,!?…♪🎵*]+", "", user_text):
+        if user_text:
+            logger.info("Ignoring noise transcript: %r", user_text)
+        state.transcript_parts.clear()
         return
 
     # Send final marker (no text — frontend already has it from chunk transcripts)

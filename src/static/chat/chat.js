@@ -598,6 +598,7 @@ async function toggleSpeech() {
         if (speechAssistantText && speechAssistantBody) {
             speechAssistantBody.innerHTML = renderMarkdown(speechAssistantText);
         }
+        // is-speaking will be removed by onTTSPlaybackChange(false) when audio finishes
         // Reset for next utterance within the same speech session
         speechAssistantBody = null;
         speechAssistantBubble = null;
@@ -610,6 +611,15 @@ async function toggleSpeech() {
         speechCursor = null;
         // Don't reset speechAssistantBody — continuation will append to it
         speechAssistantText = partialResponse || speechAssistantText;
+    };
+
+    let ttsBubble = null;
+    speechSession.onTTSPlaybackChange = (playing) => {
+        if (playing) {
+            ttsBubble = speechAssistantBubble;
+        }
+        ttsBubble?.classList.toggle('is-speaking', playing);
+        if (!playing) ttsBubble = null;
     };
 
     speechSession.onAudioLevel = (rms) => {

@@ -7,7 +7,12 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s", force=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s.%(msecs)03d %(levelname)-5s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+    force=True,
+)
 
 import httpx
 from quart import Quart, g, jsonify, redirect, render_template, request, session, url_for
@@ -413,4 +418,11 @@ if __name__ == "__main__":
 
     logger.info("bootstrap v%s (deployed %s)", VERSION, DEPLOY_DATE)
     port = int(os.environ["PORT"])
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+
+    log_config = uvicorn.config.LOGGING_CONFIG
+    fmt = "%(asctime)s.%(msecs)03d %(levelname)-5s %(name)s: %(message)s"
+    datefmt = "%H:%M:%S"
+    for handler in log_config.get("formatters", {}).values():
+        handler["fmt"] = fmt
+        handler["datefmt"] = datefmt
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", log_config=log_config)

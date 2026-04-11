@@ -52,6 +52,7 @@ def _make_mock_client(responses: list[list[bytes]]):
                 yield c
 
         resp = MagicMock()
+        resp.status_code = 200
         resp.raise_for_status = MagicMock()
         resp.aiter_raw = aiter_raw
         yield resp
@@ -163,6 +164,7 @@ async def test_system2_wait_for_sentences():
                     yield c
                     await asyncio.sleep(0.05)
             resp = MagicMock()
+            resp.status_code = 200
             resp.raise_for_status = MagicMock()
             resp.aiter_raw = aiter_raw
             yield resp

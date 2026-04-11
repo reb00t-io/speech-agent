@@ -12,8 +12,10 @@ import aiohttp
 from quart import Response, jsonify
 
 try:
+    from .dual_llm import dual_stream
     from .tool_executor import execute_tool_call
 except ImportError:
+    from dual_llm import dual_stream
     from tool_executor import execute_tool_call
 
 MAX_TOOL_CALL_ROUNDS = 10
@@ -199,6 +201,36 @@ async def execute_backend_tool_round(messages: list[dict], tool_calls: list[dict
             )
 
 
+async def generate_dual_stream(
+    *,
+    messages: list[dict],
+    save_sessions: Callable[[], None],
+    llm_base_url: str,
+    llm_api_key: str,
+    llm_model: str,
+    stream_pace_seconds: float,
+):
+    """Generate a response using the dual-LLM system (no tool calling)."""
+    try:
+        reply_parts: list[str] = []
+        async for token in dual_stream(
+            messages=messages,
+            model=llm_model,
+            base_url=llm_base_url,
+            api_key=llm_api_key,
+        ):
+            reply_parts.append(token)
+            for piece in _split_stream_text(token):
+                yield emit_event(json.dumps({"choices": [{"delta": {"content": piece}}]}, separators=(",", ":")))
+                if stream_pace_seconds > 0:
+                    await asyncio.sleep(stream_pace_seconds)
+
+        messages.append({"role": "assistant", "content": "".join(reply_parts)})
+        yield emit_event("[DONE]")
+    finally:
+        save_sessions()
+
+
 async def generate_stream(
     *,
     messages: list[dict],
@@ -352,10 +384,19 @@ async def post_chat_response(
     if tool_results:
         append_tool_result_messages(messages, tool_results)
 
-    llm_body = {"model": llm_model, "stream": True, "messages": messages}
-
-    return Response(
-        generate_stream(
+    # Use dual-LLM for fresh prompts (not tool result continuations)
+    if prompt and not tool_results and callable(generate_dual_stream):
+        generator = generate_dual_stream(
+            messages=messages,
+            save_sessions=save_sessions,
+            llm_base_url=llm_base_url,
+            llm_api_key=llm_api_key,
+            llm_model=llm_model,
+            stream_pace_seconds=stream_pace_seconds,
+        )
+    else:
+        llm_body = {"model": llm_model, "stream": True, "messages": messages}
+        generator = generate_stream(
             messages=messages,
             save_sessions=save_sessions,
             client_factory=client_factory,
@@ -365,7 +406,10 @@ async def post_chat_response(
             stream_pace_seconds=stream_pace_seconds,
             tools=tools or [],
             session_id=session_id,
-        ),
+        )
+
+    return Response(
+        generator,
         content_type="text/event-stream",
         headers={
             "X-Accel-Buffering": "no",

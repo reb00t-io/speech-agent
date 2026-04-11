@@ -1,10 +1,13 @@
 """Tests for src/tts.py — TTS client and sentence splitting."""
+import base64
+import json
+import struct
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
-from src.tts import split_sentences, synthesize, wav_to_base64
+from src.tts import split_sentences, synthesize, wav_to_base64, _pcm_to_wav
 
 
 # ─── split_sentences ─────────────────────────────────────────────────────────
@@ -58,77 +61,136 @@ def test_split_multiline():
 # ─── wav_to_base64 ──────────────────────────────────────────────────────────
 
 def test_wav_to_base64():
-    import base64
     data = b"RIFF\x00\x00\x00\x00WAVEfmt "
     encoded = wav_to_base64(data)
     assert base64.b64decode(encoded) == data
 
 
+# ─── _pcm_to_wav ────────────────────────────────────────────────────────────
+
+def test_pcm_to_wav():
+    """PCM float32 LE should be converted to a valid WAV file."""
+    import wave
+    import io
+    # 10 samples of float32 silence
+    pcm = struct.pack("<10f", *([0.0] * 10))
+    wav = _pcm_to_wav(pcm, sample_rate=24000)
+    assert wav[:4] == b"RIFF"
+    with wave.open(io.BytesIO(wav), "rb") as wf:
+        assert wf.getnchannels() == 1
+        assert wf.getsampwidth() == 2
+        assert wf.getframerate() == 24000
+        assert wf.getnframes() == 10
+
+
+def test_pcm_to_wav_clamps():
+    """Values outside [-1, 1] should be clamped."""
+    pcm = struct.pack("<2f", 2.0, -2.0)
+    wav = _pcm_to_wav(pcm)
+    assert wav[:4] == b"RIFF"
+
+
 # ─── synthesize ──────────────────────────────────────────────────────────────
 
-@pytest.fixture
-def mock_client():
-    client = AsyncMock(spec=httpx.AsyncClient)
-    return client
+def _make_sse_response(text: str = "Hello") -> list[str]:
+    """Build SSE chunks like the Mistral API returns."""
+    # Create some float32 PCM data
+    pcm_data = struct.pack("<4f", 0.1, 0.2, -0.1, 0.0)
+    audio_b64 = base64.b64encode(pcm_data).decode()
+    return [
+        f"event: speech.audio.delta\ndata: {json.dumps({'audio_data': audio_b64})}\n\n",
+        f"event: speech.audio.delta\ndata: {json.dumps({'audio_data': audio_b64})}\n\n",
+        f'event: speech.audio.done\ndata: {json.dumps({"usage": {"characters_count": len(text)}})}\n\n',
+    ]
 
 
-async def test_synthesize_sends_correct_request(mock_client):
-    response = MagicMock()
-    response.status_code = 200
-    response.content = b"RIFF fake wav data"
-    response.raise_for_status = MagicMock()
-    mock_client.post = AsyncMock(return_value=response)
+async def test_synthesize_calls_mistral_api():
+    """synthesize should POST to Mistral API with correct params."""
+    sse_chunks = _make_sse_response()
+
+    async def fake_aiter_text():
+        for chunk in sse_chunks:
+            yield chunk
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.aiter_text = fake_aiter_text
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+    client = MagicMock()
+    client.stream = MagicMock(return_value=mock_resp)
+    client.aclose = AsyncMock()
 
     result = await synthesize(
         "Hello world",
-        base_url="http://tts-server",
-        language="en",
-        speaker=0,
-        client=mock_client,
+        api_key="test-key",
+        model="voxtral-mini-tts-2603",
+        voice="en_neutral_female",
+        client=client,
     )
 
-    assert result == b"RIFF fake wav data"
-    mock_client.post.assert_awaited_once()
-    call_args = mock_client.post.call_args
-    assert call_args[0][0] == "http://tts-server/tts"
-    assert call_args[1]["json"]["text"] == "Hello world"
-    assert call_args[1]["json"]["language"] == "en"
-    assert call_args[1]["json"]["speaker"] == 0
+    # Should return valid WAV
+    assert result[:4] == b"RIFF"
+
+    # Verify API call
+    call_args = client.stream.call_args
+    assert call_args[0][0] == "POST"
+    assert "mistral.ai" in call_args[0][1]
+    assert call_args[1]["json"]["input"] == "Hello world"
+    assert call_args[1]["json"]["model"] == "voxtral-mini-tts-2603"
+    assert call_args[1]["json"]["voice_id"] == "en_neutral_female"
+    assert call_args[1]["json"]["stream"] is True
+    assert call_args[1]["json"]["response_format"] == "pcm"
+    assert "Bearer test-key" in call_args[1]["headers"]["Authorization"]
 
 
-async def test_synthesize_with_german(mock_client):
-    response = MagicMock()
-    response.status_code = 200
-    response.content = b"wav"
-    response.raise_for_status = MagicMock()
-    mock_client.post = AsyncMock(return_value=response)
+async def test_synthesize_with_custom_voice():
+    sse_chunks = _make_sse_response()
+
+    async def fake_aiter_text():
+        for chunk in sse_chunks:
+            yield chunk
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.aiter_text = fake_aiter_text
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+    client = MagicMock()
+    client.stream = MagicMock(return_value=mock_resp)
+    client.aclose = AsyncMock()
 
     await synthesize(
         "Hallo Welt",
-        base_url="http://tts-server",
-        language="de",
-        speaker=1,
-        client=mock_client,
+        api_key="test-key",
+        voice="de_female",
+        client=client,
     )
 
-    call_args = mock_client.post.call_args
-    assert call_args[1]["json"]["language"] == "de"
-    assert call_args[1]["json"]["speaker"] == 1
+    call_args = client.stream.call_args
+    assert call_args[1]["json"]["voice_id"] == "de_female"
 
 
-async def test_synthesize_raises_on_error(mock_client):
-    response = MagicMock()
-    response.status_code = 500
-    response.text = "Internal Server Error"
-    response.raise_for_status = MagicMock(
-        side_effect=httpx.HTTPStatusError("500", request=MagicMock(), response=response)
+async def test_synthesize_raises_on_error():
+    mock_resp = MagicMock()
+    error_response = MagicMock()
+    error_response.status_code = 401
+    error_response.text = "Unauthorized"
+    mock_resp.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError("401", request=MagicMock(), response=error_response)
     )
-    mock_client.post = AsyncMock(return_value=response)
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+    client = MagicMock()
+    client.stream = MagicMock(return_value=mock_resp)
+    client.aclose = AsyncMock()
 
     with pytest.raises(httpx.HTTPStatusError):
         await synthesize(
             "Hello",
-            base_url="http://tts-server",
-            language="en",
-            client=mock_client,
+            api_key="bad-key",
+            client=client,
         )
