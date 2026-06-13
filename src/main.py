@@ -20,6 +20,7 @@ from quart import Quart, g, jsonify, redirect, render_template, request, session
 try:
     from .asr import transcribe
     from .documents import resolve_download
+    from .plugins import load_plugins
     from .runtime_logs import configure_runtime_log_capture
     from .speech import handle_speech_ws
     from .streaming import get_session_response, post_chat_response, visible_messages
@@ -27,6 +28,7 @@ try:
 except ImportError:
     from asr import transcribe
     from documents import resolve_download
+    from plugins import load_plugins
     from runtime_logs import configure_runtime_log_capture
     from speech import handle_speech_ws
     from streaming import get_session_response, post_chat_response, visible_messages
@@ -35,6 +37,9 @@ except ImportError:
 app = Quart(__name__)
 configure_runtime_log_capture()
 logger = logging.getLogger(__name__)
+# Load deployment-injected tool plugins (AGENT_PLUGINS) into the shared
+# registry before any request builds its tool list. No-op when unset.
+load_plugins()
 REQUEST_LOG_PATH = Path(os.environ.get("REQUEST_LOG_PATH", "data/requests.log"))
 REQUEST_LOG_BODY_LIMIT = int(os.environ.get("REQUEST_LOG_BODY_LIMIT", "20000"))
 _request_log_lock = threading.Lock()
@@ -242,7 +247,11 @@ async def log_client_response(response):
 
 
 VERSION_PATH = _resolve_existing_path("VERSION")
-PROMPT_PATH = _resolve_existing_path("config/system_prompt.json")
+# A deployment can inject its own identity/instructions by pointing
+# SYSTEM_PROMPT_PATH at a mounted prompt file; otherwise the generic default
+# under config/ is used.
+_SYSTEM_PROMPT_ENV = os.environ.get("SYSTEM_PROMPT_PATH", "").strip()
+PROMPT_PATH = Path(_SYSTEM_PROMPT_ENV) if _SYSTEM_PROMPT_ENV else _resolve_existing_path("config/system_prompt.json")
 DOCS_PATH = _resolve_existing_path("docs/app_docs.md")
 
 VERSION = VERSION_PATH.read_text().strip()

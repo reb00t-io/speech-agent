@@ -127,13 +127,18 @@ Things that are easy to break:
   - `pytest test/test_speech.py test/test_e2e_speech.py`
 
 ### Example: Add a new tool
-- Files to edit:
+Only add **domain-agnostic** tools to the core (they belong in every
+deployment). Domain-specific tools (smart-home control, a particular API, …)
+must be **plugins** injected via `AGENT_PLUGINS`, not baked in — see
+`src/plugins.py` and the "Tool plugins" section of the README.
+
+- Files to edit (generic builtin tool):
   - `src/tool_schemas.py` (define the tool schema, add it to `ALL_TOOLS`)
   - `src/tool_executor.py` (implement execution in `execute_tool_call`)
 - Tests to add:
   - `test/test_main.py` (tool availability + execution test)
 - Commands to run:
-  - `pytest test/test_main.py`
+  - `pytest test/test_main.py test/test_plugins.py`
 
 ## 10. Pull Requests & Branching
 Default branch: main

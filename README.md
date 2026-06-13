@@ -51,6 +51,27 @@ docker compose up
 | `SESSIONS_PATH` | no | `data/sessions.json` | Where chat history is persisted |
 | `REQUEST_LOG_PATH` | no | `data/requests.log` | Request/response log file |
 | `DOWNLOADS_DIR` | no | `data/downloads` | Where `publish_document` PDFs are stored and served from `/download/<token>.pdf` |
+| `SYSTEM_PROMPT_PATH` | no | `config/system_prompt.json` | Override the system prompt with a mounted file (lets a deployment inject its own identity/instructions) |
+| `AGENT_PLUGINS` | no | `""` | Comma-separated Python module names or file paths that contribute extra tools — see [Tool plugins](#tool-plugins) |
+
+## Tool plugins
+
+This is a **generic** agent. The core ships only domain-agnostic tools
+(`web_search`, `fetch_url`, `python`, `bash`, `get_logs`, `publish_document`)
+and a generic system prompt — run it standalone and it just works.
+
+A *deployment* injects its own domain tools and identity without forking:
+
+- **Tools** — set `AGENT_PLUGINS` to a comma-separated list of Python module
+  names or file paths. Each plugin module exposes `register(registry)` and
+  calls `registry.add_tool(schema, handler)`. A handler has the signature
+  `async def handler(session, args: dict) -> dict` (see `src/plugins.py`).
+- **Identity / instructions** — point `SYSTEM_PROMPT_PATH` at a mounted prompt
+  file to replace the default prompt.
+
+Example: the [netmon](https://github.com/reb00t-io/netmon) home hub mounts a
+`home_tools.py` plugin (smart-home control over its HTTP API) and a "Verity"
+system prompt at deploy time; neither lives in this repo.
 
 ## Project Structure
 
@@ -62,8 +83,9 @@ src/
   asr.py               # ASR client (OpenAI-compatible transcription API)
   streaming.py         # SSE streaming for text chat, tool orchestration
   documents.py         # Markdown → PDF publishing + secure download paths
-  tool_schemas.py      # Tool definitions (single shared tool set)
-  tool_executor.py     # Tool execution (bash, python, web tools, publish_document)
+  tool_schemas.py      # Builtin (generic) tool definitions + plugin merge
+  tool_executor.py     # Tool execution (bash, python, web tools, publish_document) + plugin dispatch
+  plugins.py           # Tool-plugin seam: ToolRegistry + AGENT_PLUGINS loader
   web_tools.py         # Web search and URL fetching
   runtime_logs.py      # In-memory log capture
   templates/
@@ -73,7 +95,7 @@ src/
     speech.js          # SpeechSession class (WebSocket + mic capture for voice)
     pcm-processor.js   # AudioWorklet for PCM capture
 config/
-  system_prompt.json   # The single AI system prompt
+  system_prompt.json   # The default (generic) system prompt; override via SYSTEM_PROMPT_PATH
 docs/
   app_docs.md              # App documentation (injected into the system prompt)
   speech_mode_spec.md      # High-level speech mode spec
