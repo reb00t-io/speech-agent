@@ -14,10 +14,18 @@ import aiohttp
 
 try:
     from .documents import publish_markdown
+    from .home_control import (
+        control_audio, control_device, home_capabilities, home_status,
+        list_devices, run_scene,
+    )
     from .runtime_logs import get_backend_logs, normalize_log_limit
     from .web_tools import fetch_url, normalize_max_chars, normalize_max_results, web_search
 except ImportError:
     from documents import publish_markdown
+    from home_control import (
+        control_audio, control_device, home_capabilities, home_status,
+        list_devices, run_scene,
+    )
     from runtime_logs import get_backend_logs, normalize_log_limit
     from web_tools import fetch_url, normalize_max_chars, normalize_max_results, web_search
 
@@ -212,5 +220,30 @@ async def execute_tool_call(session: aiohttp.ClientSession, tool_call: dict[str,
             return {"error": "Frontend logs must be requested through the client bridge"}
         logger.warning("get_logs requested with invalid system=%r", system)
         return {"error": "Missing or invalid required argument: system"}
+
+    # --- home control (operate the house via the hub API) --------------------
+    if fn_name == "home_capabilities":
+        return await home_capabilities(session)
+
+    if fn_name == "home_status":
+        return await home_status(session)
+
+    if fn_name == "list_devices":
+        return await list_devices(session)
+
+    if fn_name == "control_device":
+        device_id = str(fn_args.get("device_id") or "").strip()
+        action = str(fn_args.get("action") or "").strip()
+        params = fn_args.get("params") if isinstance(fn_args.get("params"), dict) else {}
+        return await control_device(session, device_id, action, params)
+
+    if fn_name == "run_scene":
+        return await run_scene(session, str(fn_args.get("name") or "").strip())
+
+    if fn_name == "control_audio":
+        return await control_audio(
+            session, str(fn_args.get("action") or "").strip(),
+            fn_args.get("station"), fn_args.get("volume"),
+        )
 
     return {"error": f"Unknown tool: {fn_name}"}

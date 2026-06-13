@@ -152,6 +152,108 @@ PUBLISH_DOCUMENT_TOOL = {
     },
 }
 
+# --- home control: operate the house through the hub API --------------------
+
+HOME_CAPABILITIES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "home_capabilities",
+        "description": (
+            "Discover what the smart home can do: device kinds, every device "
+            "(id, name, kind) and its available actions, the scenes, and the "
+            "audio stations. Call this first when you need to control something "
+            "and don't already know the device id or action."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+HOME_STATUS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "home_status",
+        "description": (
+            "Get the current home overview: who is home (presence), internet/"
+            "network health, and any anomalies."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+LIST_DEVICES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "list_devices",
+        "description": "List all smart-home devices with their live status (e.g. blind position/state).",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+CONTROL_DEVICE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "control_device",
+        "description": (
+            "Run an action on a smart-home device by its id (e.g. open/close/stop "
+            "a blind, on/off a relay, or set a position). Use home_capabilities or "
+            "list_devices to find device ids and valid actions."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "device_id": {"type": "string", "description": "Device id, e.g. 'wz-gross'."},
+                "action": {"type": "string", "description": "Action, e.g. 'open', 'close', 'stop', 'position'."},
+                "params": {
+                    "type": "object",
+                    "description": "Optional action params, e.g. {\"value\": 30} for a position 0..100.",
+                },
+            },
+            "required": ["device_id", "action"],
+        },
+    },
+}
+
+RUN_SCENE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "run_scene",
+        "description": "Run a named home scene (e.g. morning, evening, night, leaving, deter).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Scene name."},
+            },
+            "required": ["name"],
+        },
+    },
+}
+
+CONTROL_AUDIO_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "control_audio",
+        "description": "Control room audio: play a radio station, stop, or set volume (0..1).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["play", "stop", "volume"]},
+                "station": {"type": "string", "description": "Station name for action=play (e.g. 'Flux FM')."},
+                "volume": {"type": "number", "description": "Volume 0..1 for action=volume.", "minimum": 0, "maximum": 1},
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+HOME_TOOLS = [
+    HOME_CAPABILITIES_TOOL,
+    HOME_STATUS_TOOL,
+    LIST_DEVICES_TOOL,
+    CONTROL_DEVICE_TOOL,
+    RUN_SCENE_TOOL,
+    CONTROL_AUDIO_TOOL,
+]
+
 ALL_TOOLS = [
     WEB_SEARCH_TOOL,
     FETCH_URL_TOOL,
@@ -159,6 +261,7 @@ ALL_TOOLS = [
     BASH_TOOL,
     GET_LOGS_TOOL,
     PUBLISH_DOCUMENT_TOOL,
+    *HOME_TOOLS,
 ]
 
 
