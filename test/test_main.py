@@ -680,3 +680,30 @@ async def test_published_document_is_downloadable(client, tmp_path, monkeypatch)
     assert resp.status_code == 200
     assert resp.headers["Content-Type"] == "application/pdf"
     assert (await resp.get_data())[:5] == b"%PDF-"
+
+
+# ─── reverse-proxy subpath (APP_ROOT) ────────────────────────────────────────
+
+async def test_no_app_root_emits_root_paths(client):
+    resp = await client.get("/")
+    body = await resp.get_data(as_text=True)
+    assert '/static/chat/chat.js' in body
+    assert 'window.APP_ROOT = ""' in body
+
+
+async def test_app_root_prefixes_emitted_urls(client, monkeypatch):
+    monkeypatch.setattr(main_module, "APP_ROOT", "/agent")
+    resp = await client.get("/")
+    body = await resp.get_data(as_text=True)
+    assert 'window.APP_ROOT = "/agent"' in body
+    assert '/agent/static/chat/chat.js' in body
+
+
+async def test_app_root_redirects_keep_prefix(monkeypatch):
+    monkeypatch.setattr(main_module, "APP_ROOT", "/agent")
+    monkeypatch.setattr(main_module, "AUTH_MODE", "password")
+    monkeypatch.setattr(main_module, "AUTH_PASSWORD", "pw")
+    main_module.app.secret_key = "test"
+    resp = await main_module.app.test_client().get("/")  # unauthenticated
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith("/agent/login")

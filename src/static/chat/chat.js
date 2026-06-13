@@ -2,6 +2,10 @@ import MarkdownIt from 'markdown-it';
 import createDOMPurify from 'dompurify';
 import { SpeechSession } from './speech.js';
 
+// Public URL prefix when served behind a reverse proxy under a subpath
+// (e.g. "/agent"); empty when served at the root. Set by index.html.
+const APP_ROOT = window.APP_ROOT || '';
+
 // ─── Setup ──────────────────────────────────────────────────────────────────
 const md = new MarkdownIt({ breaks: true, linkify: true });
 const DOMPurify = createDOMPurify(window);
@@ -145,7 +149,7 @@ function anchorUserMessageToTop(userWrap, assistantWrap) {
 // ─── Load history ──────────────────────────────────────────────────────────────
 async function loadHistory() {
     try {
-        const res = await fetch('/v1/sessions/latest', { headers: authHeaders() });
+        const res = await fetch(APP_ROOT + '/v1/sessions/latest', { headers: authHeaders() });
         if (!res.ok) return;
         const { session_id, messages } = await res.json();
         if (!session_id || !messages?.length) return;
@@ -218,7 +222,7 @@ async function streamResponse(requestBody, bubble, statusEl) {
     let pendingToolResults = [];
 
     while (true) {
-        const res = await fetch('/v1/responses', {
+        const res = await fetch(APP_ROOT + '/v1/responses', {
             method: 'POST',
             headers: authHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify(requestBody),

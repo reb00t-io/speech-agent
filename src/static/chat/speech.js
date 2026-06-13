@@ -43,7 +43,8 @@ export class SpeechSession {
         const params = new URLSearchParams({ mode: this.mode });
         if (this.sessionId) params.set('session_id', this.sessionId);
         if (this.dictation) params.set('dictation', '1');
-        const url = `${proto}//${location.host}/ws/speech?${params}`;
+        const root = window.APP_ROOT || '';
+        const url = `${proto}//${location.host}${root}/ws/speech?${params}`;
 
         this.ws = new WebSocket(url);
         this.ws.binaryType = 'arraybuffer';
@@ -79,7 +80,7 @@ export class SpeechSession {
         }
 
         this.audioCtx = new AudioContext({ sampleRate: 16000 });
-        await this.audioCtx.audioWorklet.addModule('/static/chat/pcm-processor.js');
+        await this.audioCtx.audioWorklet.addModule((window.APP_ROOT || '') + '/static/chat/pcm-processor.js');
 
         const source = this.audioCtx.createMediaStreamSource(this.stream);
         this.workletNode = new AudioWorkletNode(this.audioCtx, 'pcm-processor');

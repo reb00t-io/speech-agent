@@ -256,6 +256,12 @@ ASR_MODEL    = os.environ.get("ASR_MODEL", "whisper-1")
 ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "")
 STREAM_PACE_SECONDS = float(os.environ.get("STREAM_PACE_SECONDS", "0.003"))
 
+# Public URL prefix when mounted behind a reverse proxy under a subpath
+# (e.g. APP_ROOT=/agent). The proxy strips the prefix before it reaches us, so
+# routes stay at "/"; we only prepend APP_ROOT to URLs we *emit* (templates,
+# redirects, and the value handed to the frontend).
+APP_ROOT = os.environ.get("APP_ROOT", "").rstrip("/")
+
 # Client auth — if unset, auth is skipped (useful in local dev)
 API_KEY = os.environ.get("API_KEY", "")
 
@@ -337,34 +343,35 @@ async def favicon():
 @app.route("/login", methods=["GET", "POST"])
 async def login():
     if AUTH_MODE == "none":
-        return redirect(url_for("index"))
+        return redirect((APP_ROOT + "/"))
     if _is_authenticated():
-        return redirect(url_for("index"))
+        return redirect((APP_ROOT + "/"))
     error = None
     if request.method == "POST":
         form = await request.form
         if form.get("password") == AUTH_PASSWORD:
             session["authed"] = True
-            return redirect(url_for("index"))
+            return redirect((APP_ROOT + "/"))
         error = "Incorrect password."
-    return await render_template("login.html", error=error)
+    return await render_template("login.html", error=error, app_root=APP_ROOT)
 
 
 @app.route("/logout")
 async def logout():
     session.clear()
-    return redirect(url_for("login"))
+    return redirect((APP_ROOT + "/login"))
 
 
 @app.route("/")
 async def index():
     if not _is_authenticated():
-        return redirect(url_for("login"))
+        return redirect((APP_ROOT + "/login"))
     return await render_template(
         "index.html",
         version=VERSION,
         deploy_date=DEPLOY_DATE,
         chat_api_key=API_KEY,
+        app_root=APP_ROOT,
     )
 
 
@@ -438,7 +445,7 @@ async def download(name: str):
     from quart import Response
 
     if not _is_authenticated():
-        return redirect(url_for("login"))
+        return redirect((APP_ROOT + "/login"))
     path = resolve_download(name)
     if path is None:
         return Response("Not found", status=404)
