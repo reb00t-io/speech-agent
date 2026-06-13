@@ -70,6 +70,7 @@ def chunk_audio(pcm: bytes, chunk_size: int = 8192) -> list[bytes]:
 @pytest.fixture(autouse=True)
 def reset_sessions(tmp_path, monkeypatch):
     monkeypatch.setattr("src.speech.AUDIO_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setattr("src.speech.MISTRAL_API_KEY", "")  # disable TTS; covered by test_tts_integration.py
     sessions.clear()
     session_modes.clear()
     last_session_ids.clear()
@@ -97,6 +98,7 @@ def make_llm_mock(tokens: list[str]):
             yield c
 
     mock_resp = MagicMock()
+    mock_resp.status_code = 200
     mock_resp.raise_for_status = MagicMock()
     mock_resp.aiter_raw = aiter_raw
     mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
@@ -157,7 +159,7 @@ async def test_e2e_hello_world(ws_client):
     llm_mock = make_llm_mock(["Hi", " there", "!"])
 
     with patch("src.speech.transcribe", side_effect=mock_asr), \
-         patch("src.speech.httpx.AsyncClient", return_value=llm_mock):
+         patch("src.dual_llm.httpx.AsyncClient", return_value=llm_mock):
         async with ws_client.websocket("/ws/speech?mode=user") as ws:
             start_msg = json.loads(await ws.receive())
             assert start_msg["type"] == "session_start"
@@ -238,7 +240,7 @@ async def test_e2e_multiple_utterances(ws_client):
     llm_mock = make_llm_mock(["OK"])
 
     with patch("src.speech.transcribe", side_effect=mock_asr), \
-         patch("src.speech.httpx.AsyncClient", return_value=llm_mock):
+         patch("src.dual_llm.httpx.AsyncClient", return_value=llm_mock):
         async with ws_client.websocket("/ws/speech?mode=user") as ws:
             await ws.receive()  # session_start
 
@@ -307,6 +309,7 @@ async def test_e2e_interruption_and_continuation(ws_client):
                     await asyncio.sleep(0.3)  # slow to allow interruption
 
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
         mock_resp.aiter_raw = aiter_raw
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
@@ -319,7 +322,7 @@ async def test_e2e_interruption_and_continuation(ws_client):
         return mock_client
 
     with patch("src.speech.transcribe", side_effect=mock_asr), \
-         patch("src.speech.httpx.AsyncClient", side_effect=lambda **kw: make_dynamic_llm_mock()):
+         patch("src.dual_llm.httpx.AsyncClient", side_effect=lambda **kw: make_dynamic_llm_mock()):
         async with ws_client.websocket("/ws/speech?mode=user") as ws:
             await ws.receive()  # session_start
 

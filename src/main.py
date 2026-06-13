@@ -18,15 +18,19 @@ import httpx
 from quart import Quart, g, jsonify, redirect, render_template, request, session, url_for
 
 try:
+    from .asr import transcribe
+    from .documents import resolve_download
     from .runtime_logs import configure_runtime_log_capture
     from .speech import handle_speech_ws
-    from .streaming import get_session_response, post_chat_response
-    from .tool_schemas import DEFAULT_MODE, DEV_MODE, USER_MODE, get_tools_for_mode
+    from .streaming import get_session_response, post_chat_response, visible_messages
+    from .tool_schemas import get_tools
 except ImportError:
+    from asr import transcribe
+    from documents import resolve_download
     from runtime_logs import configure_runtime_log_capture
     from speech import handle_speech_ws
-    from streaming import get_session_response, post_chat_response
-    from tool_schemas import DEFAULT_MODE, DEV_MODE, USER_MODE, get_tools_for_mode
+    from streaming import get_session_response, post_chat_response, visible_messages
+    from tool_schemas import get_tools
 
 app = Quart(__name__)
 configure_runtime_log_capture()
@@ -34,6 +38,7 @@ logger = logging.getLogger(__name__)
 REQUEST_LOG_PATH = Path(os.environ.get("REQUEST_LOG_PATH", "data/requests.log"))
 REQUEST_LOG_BODY_LIMIT = int(os.environ.get("REQUEST_LOG_BODY_LIMIT", "20000"))
 _request_log_lock = threading.Lock()
+_request_log_write_failed = False
 
 def _resolve_existing_path(*relative_paths: str) -> Path:
     search_roots = [Path.cwd(), Path(__file__).resolve().parent, Path(__file__).resolve().parent.parent]
@@ -74,12 +79,20 @@ def _stringify_request_log_body(body: object) -> str:
 
 
 def _append_request_log(payload: dict[str, object]) -> None:
-    REQUEST_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    global _request_log_write_failed
     line = json.dumps(payload, ensure_ascii=False)
-    with _request_log_lock:
-        with REQUEST_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.write("\n")
+    try:
+        REQUEST_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _request_log_lock:
+            with REQUEST_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.write("\n")
+        _request_log_write_failed = False
+    except OSError as exc:
+        # Request logging must never break request handling.
+        if not _request_log_write_failed:
+            _request_log_write_failed = True
+            logger.error("Cannot write request log %s: %s", REQUEST_LOG_PATH, exc)
 
 
 def _log_response_chunk(request_id: str, chunk_index: int, chunk: bytes | str) -> None:
@@ -143,8 +156,19 @@ class LoggedResponseBody:
 async def log_client_request() -> None:
     request_id = os.urandom(8).hex()
     g.request_log_id = request_id
-    request_body = _stringify_request_log_body(await request.get_data(cache=True, as_text=True))
-    body, body_truncated = _truncate_request_log_text(request_body)
+    raw_body = await request.get_data(cache=True, as_text=False)
+    content_type = request.headers.get("Content-Type", "")
+    is_textual = (
+        not content_type
+        or content_type.startswith("text/")
+        or any(token in content_type for token in ("json", "xml", "javascript", "x-www-form-urlencoded"))
+    )
+    if is_textual:
+        request_body = raw_body.decode("utf-8", errors="replace") if isinstance(raw_body, bytes) else str(raw_body)
+        body, body_truncated = _truncate_request_log_text(request_body)
+    else:
+        body = f"[binary {len(raw_body)} bytes, content-type: {content_type}]"
+        body_truncated = False
     _append_request_log(
         {
             "ts": _request_log_timestamp(),
@@ -158,6 +182,15 @@ async def log_client_request() -> None:
             "body_truncated": body_truncated,
         }
     )
+
+
+@app.after_request
+async def _revalidate_static(response):
+    # Force the browser to revalidate JS/CSS so a new deploy is picked up
+    # immediately instead of running a stale cached bundle.
+    if request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.after_request
@@ -180,9 +213,19 @@ async def log_client_response(response):
         response.response = LoggedResponseBody(response.response, request_id)
         return response
 
-    result = response.get_data(as_text=True)
-    response_body = (await result) if asyncio.iscoroutine(result) else result
-    body, body_truncated = _truncate_request_log_text(response_body)
+    content_type = response.headers.get("Content-Type", "")
+    is_textual = content_type.startswith("text/") or any(
+        token in content_type for token in ("json", "xml", "javascript", "x-www-form-urlencoded")
+    )
+    if is_textual:
+        result = response.get_data(as_text=True)
+        response_body = (await result) if asyncio.iscoroutine(result) else result
+        body, body_truncated = _truncate_request_log_text(response_body)
+    else:
+        raw = response.get_data()
+        raw = (await raw) if asyncio.iscoroutine(raw) else raw
+        body = f"[binary {len(raw)} bytes, content-type: {content_type or 'unknown'}]"
+        body_truncated = False
     _append_request_log(
         {
             "ts": _request_log_timestamp(),
@@ -199,14 +242,8 @@ async def log_client_response(response):
 
 
 VERSION_PATH = _resolve_existing_path("VERSION")
-PROMPT_PATHS = {
-    USER_MODE: _resolve_existing_path("config/user_system_prompt.json"),
-    DEV_MODE: _resolve_existing_path("config/dev_system_prompt.json"),
-}
-DOCS_PATHS = {
-    USER_MODE: _resolve_existing_path("docs/user_docs.md"),
-    DEV_MODE: _resolve_existing_path("docs/dev_docs.md"),
-}
+PROMPT_PATH = _resolve_existing_path("config/system_prompt.json")
+DOCS_PATH = _resolve_existing_path("docs/app_docs.md")
 
 VERSION = VERSION_PATH.read_text().strip()
 DEPLOY_DATE = os.environ.get("DEPLOY_DATE", "unknown")
@@ -216,6 +253,7 @@ LLM_BASE_URL = os.environ["LLM_BASE_URL"]
 LLM_API_KEY  = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL    = os.environ.get("LLM_MODEL", "gpt-oss-120b")
 ASR_MODEL    = os.environ.get("ASR_MODEL", "whisper-1")
+ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "")
 STREAM_PACE_SECONDS = float(os.environ.get("STREAM_PACE_SECONDS", "0.003"))
 
 # Client auth — if unset, auth is skipped (useful in local dev)
@@ -240,15 +278,11 @@ def _is_authenticated() -> bool:
 # Session store: session_id -> list[messages]
 SESSIONS_PATH = Path(os.environ.get("SESSIONS_PATH", "data/sessions.json"))
 sessions: dict[str, list[dict]] = {}
-session_modes: dict[str, str] = {}
 last_session_id: str | None = None
+# Retained for backward-compatible imports/fixtures; no longer drives behaviour
+# now that the user/dev mode distinction has been removed.
+session_modes: dict[str, str] = {}
 last_session_ids: dict[str, str] = {}
-
-
-def _normalize_mode(mode: str | None) -> str:
-    if mode in {USER_MODE, DEV_MODE}:
-        return mode
-    return DEFAULT_MODE
 
 
 def _load_sessions() -> None:
@@ -259,8 +293,6 @@ def _load_sessions() -> None:
             if "_meta" in data:
                 sessions.update(data.get("sessions", {}))
                 last_session_id = data["_meta"].get("last_session_id")
-                session_modes.update(data["_meta"].get("session_modes", {}))
-                last_session_ids.update(data["_meta"].get("last_session_ids", {}))
             else:
                 sessions.update(data)  # backwards compat with old format
         except Exception:
@@ -272,11 +304,7 @@ def _save_sessions() -> None:
     SESSIONS_PATH.write_text(
         json.dumps(
             {
-                "_meta": {
-                    "last_session_id": last_session_id,
-                    "last_session_ids": last_session_ids,
-                    "session_modes": session_modes,
-                },
+                "_meta": {"last_session_id": last_session_id},
                 "sessions": sessions,
             },
             ensure_ascii=False,
@@ -285,20 +313,18 @@ def _save_sessions() -> None:
     )
 
 
-def _on_session_start(session_id: str, mode: str) -> None:
+def _on_session_start(session_id: str) -> None:
     global last_session_id
     last_session_id = session_id
-    last_session_ids[_normalize_mode(mode)] = session_id
     _save_sessions()
 
 
 _load_sessions()
 
 
-def _load_system_prompt(mode: str) -> str:
-    normalized_mode = _normalize_mode(mode)
-    template = json.loads(PROMPT_PATHS[normalized_mode].read_text())["system_prompt"]
-    docs = DOCS_PATHS[normalized_mode].read_text()
+def _load_system_prompt() -> str:
+    template = json.loads(PROMPT_PATH.read_text())["system_prompt"]
+    docs = DOCS_PATH.read_text() if DOCS_PATH.exists() else ""
     return template.replace("{{docs}}", docs)
 
 
@@ -346,18 +372,13 @@ async def index():
 async def get_latest_session():
     if API_KEY and request.headers.get("Authorization", "") != f"Bearer {API_KEY}":
         return jsonify({"error": "Unauthorized"}), 401
-    mode = _normalize_mode(request.args.get("mode"))
-    latest_session_id = last_session_ids.get(mode)
-    if not latest_session_id and last_session_id in sessions and session_modes.get(last_session_id, DEFAULT_MODE) == mode:
-        latest_session_id = last_session_id
+    latest_session_id = last_session_id
     if not latest_session_id or latest_session_id not in sessions:
-        return jsonify({"session_id": None, "mode": mode, "messages": []})
-    messages = [
-        m
-        for m in sessions[latest_session_id]
-        if m.get("role") in {"user", "assistant"} and m.get("content")
-    ]
-    return jsonify({"session_id": latest_session_id, "mode": session_modes.get(latest_session_id, mode), "messages": messages})
+        return jsonify({"session_id": None, "messages": []})
+    return jsonify({
+        "session_id": latest_session_id,
+        "messages": visible_messages(sessions[latest_session_id]),
+    })
 
 
 @app.route("/v1/responses/<session_id>", methods=["GET"])
@@ -373,27 +394,15 @@ async def get_session(session_id: str):
 @app.route("/v1/responses", methods=["POST"])
 async def chat_responses():
     body = await request.get_json(force=True)
-    mode = body.get("mode")
-    normalized_mode = _normalize_mode(mode)
-    if mode is not None and normalized_mode != mode:
-        return jsonify({"error": "mode must be 'user' or 'dev'"}), 400
-
-    session_id = body.get("session_id")
-    if session_id and session_id in sessions and session_modes.get(session_id, DEFAULT_MODE) != normalized_mode:
-        sessions[session_id] = [{"role": "system", "content": _load_system_prompt(normalized_mode)}]
-        session_modes[session_id] = normalized_mode
-        _save_sessions()
-
     return await post_chat_response(
-        body={**body, "mode": normalized_mode},
+        body=body,
         sessions=sessions,
-        session_modes=session_modes,
         api_key=API_KEY,
         authorization=request.headers.get("Authorization", ""),
         load_system_prompt=_load_system_prompt,
         save_sessions=_save_sessions,
         on_session_start=_on_session_start,
-        tools=get_tools_for_mode(normalized_mode),
+        tools=get_tools(),
         client_factory=httpx.AsyncClient,
         llm_base_url=LLM_BASE_URL,
         llm_api_key=LLM_API_KEY,
@@ -402,11 +411,48 @@ async def chat_responses():
     )
 
 
+@app.route("/v1/transcribe", methods=["POST"])
+async def transcribe_audio():
+    """Transcribe a short raw-PCM recording (for dictation into the text box)."""
+    if API_KEY and request.headers.get("Authorization", "") != f"Bearer {API_KEY}":
+        return jsonify({"error": "Unauthorized"}), 401
+    pcm = await request.get_data(as_text=False)
+    if not pcm:
+        return jsonify({"error": "empty audio"}), 400
+    try:
+        text = await transcribe(
+            pcm,
+            base_url=LLM_BASE_URL,
+            api_key=LLM_API_KEY,
+            model=ASR_MODEL,
+            language=ASR_LANGUAGE,
+        )
+    except Exception as exc:
+        logger.error("Dictation transcription failed: %s", exc)
+        return jsonify({"error": "transcription failed"}), 502
+    return jsonify({"text": text})
+
+
+@app.route("/download/<name>", methods=["GET"])
+async def download(name: str):
+    from quart import Response
+
+    if not _is_authenticated():
+        return redirect(url_for("login"))
+    path = resolve_download(name)
+    if path is None:
+        return Response("Not found", status=404)
+    return Response(
+        path.read_bytes(),
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
 @app.websocket("/ws/speech")
 async def ws_speech():
     await handle_speech_ws(
         sessions=sessions,
-        session_modes=session_modes,
         load_system_prompt=_load_system_prompt,
         save_sessions=_save_sessions,
         on_session_start=_on_session_start,

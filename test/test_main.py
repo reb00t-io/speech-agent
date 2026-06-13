@@ -176,7 +176,7 @@ async def test_request_log_file_records_non_stream_request_and_response(client, 
     assert entries[0]["method"] == "GET"
     assert entries[0]["path"] == "/v1/sessions/latest"
     assert entries[1]["status_code"] == 200
-    assert '"mode":"user"' in entries[1]["body"]
+    assert '"session_id"' in entries[1]["body"]
 
 
 async def test_request_log_file_records_streaming_response_chunks(client, request_log_path):
@@ -191,6 +191,17 @@ async def test_request_log_file_records_streaming_response_chunks(client, reques
     assert "response_chunk" in events
     assert events[-1] == "response_end"
     assert any("data: [DONE]" in entry.get("body", "") for entry in entries if entry["event"] == "response_chunk")
+
+
+async def test_unwritable_request_log_does_not_break_requests(client, tmp_path, monkeypatch):
+    readonly_dir = tmp_path / "readonly"
+    readonly_dir.mkdir()
+    readonly_dir.chmod(0o555)
+    monkeypatch.setattr(main_module, "REQUEST_LOG_PATH", readonly_dir / "data" / "requests.log")
+    monkeypatch.setattr(main_module, "_request_log_write_failed", False)
+
+    resp = await client.get("/v1/sessions/latest?mode=user")
+    assert resp.status_code == 200
 
 
 async def test_auth_required_when_api_key_set(client):
@@ -231,9 +242,11 @@ async def test_missing_prompt_returns_400(client):
     assert resp.status_code == 400
 
 
-async def test_invalid_mode_returns_400(client):
-    resp = await client.post("/v1/responses", json={"prompt": "hello", "mode": "other"})
-    assert resp.status_code == 400
+async def test_mode_param_is_ignored(client):
+    # `mode` is no longer a concept; any value is accepted and ignored.
+    with mock_llm():
+        resp = await client.post("/v1/responses", json={"prompt": "hello", "mode": "other"})
+    assert resp.status_code == 200
 
 
 # ─── Session management ───────────────────────────────────────────────────────
@@ -276,19 +289,16 @@ async def test_unknown_session_id_creates_new_session(client):
 # ─── Message history ──────────────────────────────────────────────────────────
 
 async def test_system_prompt_injected_for_new_session(client):
-    with mock_llm(), patch("src.main._load_system_prompt", side_effect=lambda mode: f"prompt:{mode}"):
+    with mock_llm(), patch("src.main._load_system_prompt", return_value="prompt:sys"):
         resp = await client.post("/v1/responses", json={"prompt": "hello"})
     sid = resp.headers.get("X-Session-Id")
-    assert sessions[sid][0] == {"role": "system", "content": "prompt:user"}
+    assert sessions[sid][0] == {"role": "system", "content": "prompt:sys"}
 
 
-def test_load_system_prompt_uses_mode_specific_docs():
-    user_prompt = _load_system_prompt("user")
-    dev_prompt = _load_system_prompt("dev")
-
-    assert "User Guide" in user_prompt
-    assert "Developer Guide" in dev_prompt
-    assert user_prompt != dev_prompt
+def test_load_system_prompt_expands_docs():
+    prompt = _load_system_prompt()
+    assert "{{docs}}" not in prompt
+    assert "publish_document" in prompt
 
 
 async def test_user_message_appended_to_history(client):
@@ -396,37 +406,43 @@ async def test_tool_call_round_executes_backend_tool_and_continues_stream(client
     assert json.loads(request_bodies[1]["messages"][-1]["content"]) == {"stdout": "1\n", "stderr": "", "exit_code": 0}
     assert sessions[sid][-1] == {"role": "assistant", "content": "The result is 1."}
 
+    # The stream announces the running tool, then clears it.
+    assert '"tool_status":{"name":"python"' in text
+    assert '"tool_status":null' in text
 
-async def test_user_mode_excludes_bash_tool(client):
+
+async def test_web_search_tool_status_includes_arguments(client):
+    rounds = [
+        [
+            b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n',
+            (
+                b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_s","type":"function",'
+                b'"function":{"name":"web_search","arguments":"{\\"query\\": \\\"weather\\\"}"}}]},'
+                b'"finish_reason":"tool_calls"}]}\n\n'
+            ),
+            b'data: [DONE]\n\n',
+        ],
+        _sse("done"),
+    ]
+    execute_tool = AsyncMock(return_value={"results": []})
+    with mock_llm_rounds(rounds), patch("src.streaming.execute_tool_call", execute_tool):
+        resp = await client.post("/v1/responses", json={"prompt": "weather?", "web_search": True})
+        text = (await resp.get_data()).decode()
+
+    # The active web_search call (with its query) is surfaced to the client.
+    assert '"tool_status":{"name":"web_search"' in text
+    assert '"query":"weather"' in text
+    assert '"tool_status":null' in text
+
+
+async def test_all_tools_available(client):
     request_bodies: list[dict] = []
-    with mock_llm_rounds([_sse("ok")], capture_bodies=request_bodies), patch("src.main._load_system_prompt", side_effect=lambda mode: f"prompt:{mode}"):
-        resp = await client.post("/v1/responses", json={"prompt": "hello", "mode": "user"})
+    with mock_llm_rounds([_sse("ok")], capture_bodies=request_bodies), patch("src.main._load_system_prompt", return_value="sys"):
+        resp = await client.post("/v1/responses", json={"prompt": "hello"})
         await resp.get_data()
 
-    tool_names = [tool["function"]["name"] for tool in request_bodies[0]["tools"]]
-    assert "bash" not in tool_names
-    assert session_modes[resp.headers.get("X-Session-Id")] == "user"
-
-
-async def test_dev_mode_includes_bash_tool(client):
-    request_bodies: list[dict] = []
-    with mock_llm_rounds([_sse("ok")], capture_bodies=request_bodies), patch("src.main._load_system_prompt", side_effect=lambda mode: f"prompt:{mode}"):
-        resp = await client.post("/v1/responses", json={"prompt": "hello", "mode": "dev"})
-        await resp.get_data()
-
-    tool_names = [tool["function"]["name"] for tool in request_bodies[0]["tools"]]
-    assert "bash" in tool_names
-    assert session_modes[resp.headers.get("X-Session-Id")] == "dev"
-
-
-async def test_dev_mode_includes_get_logs_tool(client):
-    request_bodies: list[dict] = []
-    with mock_llm_rounds([_sse("ok")], capture_bodies=request_bodies), patch("src.main._load_system_prompt", side_effect=lambda mode: f"prompt:{mode}"):
-        resp = await client.post("/v1/responses", json={"prompt": "hello", "mode": "dev"})
-        await resp.get_data()
-
-    tool_names = [tool["function"]["name"] for tool in request_bodies[0]["tools"]]
-    assert "get_logs" in tool_names
+    tool_names = {tool["function"]["name"] for tool in request_bodies[0]["tools"]}
+    assert {"bash", "python", "web_search", "fetch_url", "get_logs", "publish_document"} <= tool_names
 
 
 async def test_frontend_get_logs_tool_request_is_forwarded(client):
@@ -523,47 +539,30 @@ async def test_backend_get_logs_tool_is_executed_server_side(client):
     assert '"tool_request"' not in body.decode()
 
 
-async def test_latest_session_is_mode_specific(client):
-    with mock_llm(_sse("user reply")), patch("src.main._load_system_prompt", side_effect=lambda mode: f"prompt:{mode}"):
-        user_resp = await client.post("/v1/responses", json={"prompt": "user hello", "mode": "user"})
-        await user_resp.get_data()
+async def test_latest_session_returns_most_recent(client):
+    with mock_llm(_sse("first reply")), patch("src.main._load_system_prompt", return_value="sys"):
+        first = await client.post("/v1/responses", json={"prompt": "first hello"})
+        await first.get_data()
 
-    with mock_llm(_sse("dev reply")), patch("src.main._load_system_prompt", side_effect=lambda mode: f"prompt:{mode}"):
-        dev_resp = await client.post("/v1/responses", json={"prompt": "dev hello", "mode": "dev"})
-        await dev_resp.get_data()
+    with mock_llm(_sse("second reply")), patch("src.main._load_system_prompt", return_value="sys"):
+        second = await client.post("/v1/responses", json={"prompt": "second hello"})
+        await second.get_data()
 
-    user_sid = user_resp.headers.get("X-Session-Id")
-    dev_sid = dev_resp.headers.get("X-Session-Id")
+    second_sid = second.headers.get("X-Session-Id")
+    latest = await (await client.get("/v1/sessions/latest")).get_json()
 
-    user_latest = await (await client.get("/v1/sessions/latest?mode=user")).get_json()
-    dev_latest = await (await client.get("/v1/sessions/latest?mode=dev")).get_json()
-
-    assert user_latest == {
-        "session_id": user_sid,
-        "mode": "user",
+    assert latest == {
+        "session_id": second_sid,
         "messages": [
-            {"role": "user", "content": "user hello"},
-            {"role": "assistant", "content": "user reply"},
+            {"role": "user", "content": "second hello"},
+            {"role": "assistant", "content": "second reply"},
         ],
     }
-    assert dev_latest == {
-        "session_id": dev_sid,
-        "mode": "dev",
-        "messages": [
-            {"role": "user", "content": "dev hello"},
-            {"role": "assistant", "content": "dev reply"},
-        ],
-    }
-    assert last_session_ids == {"user": user_sid, "dev": dev_sid}
 
 
-async def test_latest_session_returns_empty_for_mode_without_history(client):
-    with mock_llm(_sse("user reply")), patch("src.main._load_system_prompt", side_effect=lambda mode: f"prompt:{mode}"):
-        resp = await client.post("/v1/responses", json={"prompt": "user hello", "mode": "user"})
-        await resp.get_data()
-
-    data = await (await client.get("/v1/sessions/latest?mode=dev")).get_json()
-    assert data == {"session_id": None, "mode": "dev", "messages": []}
+async def test_latest_session_returns_empty_without_history(client):
+    data = await (await client.get("/v1/sessions/latest")).get_json()
+    assert data == {"session_id": None, "messages": []}
 
 
 async def test_tool_messages_are_hidden_from_history_endpoints(client):
@@ -593,3 +592,91 @@ async def test_tool_messages_are_hidden_from_history_endpoints(client):
         {"role": "assistant", "content": "hello"},
     ]
     assert latest["messages"] == history["messages"]
+
+
+# ─── Images / web search / deep research ──────────────────────────────────────
+
+async def test_images_build_multimodal_user_content(client):
+    request_bodies: list[dict] = []
+    data_url = "data:image/png;base64,AAAA"
+    with mock_llm_rounds([_sse("ok")], capture_bodies=request_bodies):
+        resp = await client.post("/v1/responses", json={"prompt": "what is this?", "images": [data_url]})
+        await resp.get_data()
+
+    user_msg = request_bodies[0]["messages"][-1]
+    assert user_msg["role"] == "user"
+    assert user_msg["content"] == [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": data_url}},
+    ]
+
+    # History flattens multimodal content to text with an [image] marker.
+    sid = resp.headers.get("X-Session-Id")
+    history = await (await client.get(f"/v1/responses/{sid}")).get_json()
+    assert history["messages"][0] == {"role": "user", "content": "what is this? [image]"}
+
+
+async def test_non_image_data_urls_are_ignored(client):
+    request_bodies: list[dict] = []
+    with mock_llm_rounds([_sse("ok")], capture_bodies=request_bodies):
+        resp = await client.post("/v1/responses", json={"prompt": "hi", "images": ["javascript:alert(1)"]})
+        await resp.get_data()
+
+    # No valid image → content stays a plain string.
+    assert request_bodies[0]["messages"][-1]["content"] == "hi"
+
+
+async def test_web_search_injects_system_instruction(client):
+    request_bodies: list[dict] = []
+    with mock_llm_rounds([_sse("ok")], capture_bodies=request_bodies):
+        resp = await client.post("/v1/responses", json={"prompt": "latest news", "web_search": True})
+        await resp.get_data()
+
+    system_msgs = [m for m in request_bodies[0]["messages"] if m["role"] == "system"]
+    assert any("web_search tool" in m["content"] for m in system_msgs)
+
+
+async def test_deep_research_injects_system_instruction(client):
+    request_bodies: list[dict] = []
+    with mock_llm_rounds([_sse("ok")], capture_bodies=request_bodies):
+        resp = await client.post("/v1/responses", json={"prompt": "research X", "deep_research": True})
+        await resp.get_data()
+
+    system_msgs = [m for m in request_bodies[0]["messages"] if m["role"] == "system"]
+    assert any("publish_document tool" in m["content"] for m in system_msgs)
+
+
+# ─── Dictation transcription endpoint ─────────────────────────────────────────
+
+async def test_transcribe_endpoint_returns_text(client):
+    with patch("src.main.transcribe", AsyncMock(return_value="hello world")):
+        resp = await client.post("/v1/transcribe", data=b"\x00\x01" * 100,
+                                 headers={"Content-Type": "application/octet-stream"})
+    assert resp.status_code == 200
+    assert (await resp.get_json())["text"] == "hello world"
+
+
+async def test_transcribe_endpoint_rejects_empty_audio(client):
+    resp = await client.post("/v1/transcribe", data=b"")
+    assert resp.status_code == 400
+
+
+# ─── Document download ────────────────────────────────────────────────────────
+
+async def test_download_rejects_path_traversal(client):
+    resp = await client.get("/download/..%2f..%2fetc%2fpasswd")
+    assert resp.status_code == 404
+
+
+async def test_published_document_is_downloadable(client, tmp_path, monkeypatch):
+    import src.documents as documents
+    monkeypatch.setattr(documents, "DOWNLOADS_DIR", tmp_path / "downloads")
+
+    result = documents.publish_markdown("# Report\n\nSome **content**.", title="My Report")
+    assert result["download_url"].startswith("/download/")
+    assert result["filename"].endswith(".pdf")
+
+    resp = await client.get(result["download_url"])
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"] == "application/pdf"
+    assert (await resp.get_data())[:5] == b"%PDF-"

@@ -204,6 +204,48 @@ async def test_tts_sentence_splitting_integration(ws_client, monkeypatch):
         assert "How are you?" in tts_calls[1]
 
 
+async def test_tts_audio_emitted_in_sentence_order_despite_synth_timing(ws_client, monkeypatch):
+    """Even if a later sentence synthesizes faster, audio must be sent in order."""
+    import base64
+
+    monkeypatch.setattr("src.speech.MISTRAL_API_KEY", "fake-key")
+    asr_mock = AsyncMock(return_value="hello")
+
+    async def ordered_tts(text, *, api_key, model, voice):
+        # First sentence is SLOW, second is FAST — without ordering the second
+        # would be emitted (and spoken) first.
+        await asyncio.sleep(0.3 if "Hello world" in text else 0.02)
+        return text.encode()  # use the text as identifiable "audio" bytes
+
+    with patch("src.speech.transcribe", asr_mock), \
+         patch("src.speech.dual_stream", _fake_dual_stream_two_sentences), \
+         patch("src.speech.tts_synthesize", ordered_tts):
+        async with ws_client.websocket("/ws/speech?mode=user") as ws:
+            await ws.receive()  # session_start
+
+            await ws.send(_make_pcm_tone(0.5))
+            for _ in range(6):
+                await ws.send(_make_pcm_silence(0.1))
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.8)  # allow the slow first sentence to synthesize
+            await ws.send(json.dumps({"type": "stop"}))
+
+            messages = []
+            try:
+                while True:
+                    raw = await asyncio.wait_for(ws.receive(), timeout=3.0)
+                    messages.append(json.loads(raw))
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    tts_audio = [m for m in messages if m.get("type") == "tts_audio"]
+    if tts_audio:
+        decoded = [base64.b64decode(m["audio_base64"]).decode() for m in tts_audio]
+        assert "Hello world" in decoded[0]
+        assert "How are you" in decoded[1]
+        assert [m["index"] for m in tts_audio] == list(range(len(tts_audio)))
+
+
 async def test_tts_cancellation_on_user_speech(ws_client, monkeypatch):
     """When user starts speaking during LLM+TTS, TTS should be cancelled."""
     monkeypatch.setattr("src.speech.MISTRAL_API_KEY", "fake-key")
@@ -244,6 +286,136 @@ async def test_tts_cancellation_on_user_speech(ws_client, monkeypatch):
     cancelled_msgs = [m for m in messages if m.get("type") == "llm_cancelled"]
     # May or may not have been cancelled depending on timing,
     # but the test should complete without errors either way
+
+
+async def test_barge_in_stops_tts_after_llm_done(ws_client, monkeypatch):
+    """If the user speaks after the LLM finished but TTS audio is still playing
+    in the browser, the server should send stop_audio to halt playback."""
+    monkeypatch.setattr("src.speech.MISTRAL_API_KEY", "fake-key")
+
+    asr_mock = AsyncMock(return_value="hello")
+    tts_mock = AsyncMock(return_value=_make_fake_wav())
+
+    with patch("src.speech.transcribe", asr_mock), \
+         patch("src.speech.dual_stream", _fake_dual_stream_two_sentences), \
+         patch("src.speech.tts_synthesize", tts_mock):
+        async with ws_client.websocket("/ws/speech?mode=user") as ws:
+            await ws.receive()  # session_start
+
+            # Trigger LLM and let it run to completion (fast fake stream)
+            await ws.send(_make_pcm_tone(0.5))
+            for _ in range(6):
+                await ws.send(_make_pcm_silence(0.1))
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.5)  # LLM + TTS synthesis fully done, llm_task is done
+
+            # Frontend reports it is still playing the buffered TTS audio
+            await ws.send(json.dumps({"type": "playback_state", "playing": True}))
+            await asyncio.sleep(0.05)
+
+            # User barges in with sustained speech (must exceed BARGE_IN_MIN_MS)
+            await ws.send(_make_pcm_tone(0.7, amplitude=15000))
+            await asyncio.sleep(0.1)
+
+            await ws.send(json.dumps({"type": "stop"}))
+
+            messages = []
+            try:
+                while True:
+                    raw = await asyncio.wait_for(ws.receive(), timeout=3.0)
+                    messages.append(json.loads(raw))
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    types = [m.get("type") for m in messages]
+    # The LLM finished (llm_done) before the barge-in...
+    assert "llm_done" in types
+    # ...and the barge-in produced a stop_audio (not an llm_cancelled, since
+    # there was no LLM task left to cancel).
+    assert "stop_audio" in types
+
+
+async def test_brief_loud_blip_does_not_barge_in(ws_client, monkeypatch):
+    """A short loud blip (e.g. TTS echo via the mic) must NOT interrupt — only
+    audio sustained past BARGE_IN_MIN_MS should."""
+    monkeypatch.setattr("src.speech.MISTRAL_API_KEY", "fake-key")
+    monkeypatch.setattr("src.speech.BARGE_IN_MIN_MS", 400.0)
+
+    asr_mock = AsyncMock(return_value="hello")
+    tts_mock = AsyncMock(return_value=_make_fake_wav())
+
+    with patch("src.speech.transcribe", asr_mock), \
+         patch("src.speech.dual_stream", _fake_dual_stream_two_sentences), \
+         patch("src.speech.tts_synthesize", tts_mock):
+        async with ws_client.websocket("/ws/speech?mode=user") as ws:
+            await ws.receive()  # session_start
+
+            await ws.send(_make_pcm_tone(0.5))
+            for _ in range(6):
+                await ws.send(_make_pcm_silence(0.1))
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.5)
+
+            await ws.send(json.dumps({"type": "playback_state", "playing": True}))
+            await asyncio.sleep(0.05)
+
+            # A 150ms loud blip — below the 400ms sustained threshold.
+            await ws.send(_make_pcm_tone(0.15, amplitude=15000))
+            await asyncio.sleep(0.1)
+
+            await ws.send(json.dumps({"type": "stop"}))
+
+            messages = []
+            try:
+                while True:
+                    raw = await asyncio.wait_for(ws.receive(), timeout=3.0)
+                    messages.append(json.loads(raw))
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    # The blip must not have triggered a barge-in.
+    assert "stop_audio" not in [m.get("type") for m in messages]
+
+
+async def test_no_stop_audio_when_not_playing(ws_client, monkeypatch):
+    """Speech after the LLM finished should NOT emit stop_audio if the client
+    isn't playing anything (nothing to interrupt)."""
+    monkeypatch.setattr("src.speech.MISTRAL_API_KEY", "fake-key")
+
+    asr_mock = AsyncMock(return_value="hello")
+    tts_mock = AsyncMock(return_value=_make_fake_wav())
+
+    with patch("src.speech.transcribe", asr_mock), \
+         patch("src.speech.dual_stream", _fake_dual_stream_two_sentences), \
+         patch("src.speech.tts_synthesize", tts_mock):
+        async with ws_client.websocket("/ws/speech?mode=user") as ws:
+            await ws.receive()  # session_start
+
+            await ws.send(_make_pcm_tone(0.5))
+            for _ in range(6):
+                await ws.send(_make_pcm_silence(0.1))
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.5)
+
+            # Client signals playback already finished
+            await ws.send(json.dumps({"type": "playback_state", "playing": False}))
+            await asyncio.sleep(0.05)
+
+            # New speech — starts a fresh turn, nothing to interrupt
+            await ws.send(_make_pcm_tone(0.3, amplitude=15000))
+            await asyncio.sleep(0.1)
+
+            await ws.send(json.dumps({"type": "stop"}))
+
+            messages = []
+            try:
+                while True:
+                    raw = await asyncio.wait_for(ws.receive(), timeout=3.0)
+                    messages.append(json.loads(raw))
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    assert "stop_audio" not in [m.get("type") for m in messages]
 
 
 async def test_tts_mistral_api_contract():

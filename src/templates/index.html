@@ -3,604 +3,207 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>bootstrap</title>
+  <title>Assistant</title>
   <style>
-    /* ─── Reset & Base ──────────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    html, body {
-      height: 100%;
+    :root {
+      --bg: #ffffff;
+      --fg: #0d0d0d;
+      --muted: #8e8ea0;
+      --line: #e5e5e5;
+      --bar-bg: #ffffff;
+      --bar-shadow: 0 2px 18px rgba(0,0,0,0.06), 0 0 0 1px rgba(0,0,0,0.04);
+      --chip-line: #e0e0e0;
+      --accent: #0d0d0d;
+      --user-bubble: #f4f4f4;
+      --danger: #ef4444;
+    }
+
+    html, body { height: 100%; }
+    body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
-      background: #f0f2f5;
-      color: #1a1a2e;
-      overflow: hidden;
+      background: var(--bg);
+      color: var(--fg);
+      -webkit-font-smoothing: antialiased;
     }
 
-    /* ─── App Shell ─────────────────────────────────────────────────────────── */
-    .app-shell {
-      display: flex;
-      height: 100vh;
-      width: 100vw;
-      overflow: hidden;
+    /* ─── Top bar ─────────────────────────────────────────────────────────── */
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0; height: 52px;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 1rem; z-index: 20; background: linear-gradient(var(--bg), rgba(255,255,255,0));
+    }
+    .topbar .brand { font-weight: 600; font-size: 0.95rem; letter-spacing: -0.01em; }
+    .topbar .actions { display: flex; gap: 0.25rem; }
+    .topbar button {
+      border: none; background: none; cursor: pointer; color: var(--muted);
+      font-size: 0.82rem; padding: 0.45rem 0.7rem; border-radius: 8px;
+      display: inline-flex; align-items: center; gap: 0.35rem;
+    }
+    .topbar button:hover { background: #f4f4f4; color: var(--fg); }
+
+    /* ─── Layout ──────────────────────────────────────────────────────────── */
+    /* #main spans the full width so the conversation scrollbar sits at the
+       screen edge; the message column is centred by the inner #messages. */
+    #main {
+      display: flex; flex-direction: column;
+      height: 100dvh; width: 100%;
     }
 
-    /* ─── Main Content ──────────────────────────────────────────────────────── */
-    .main-content {
-      flex: 1;
-      overflow-y: auto;
-      padding: 3rem 4rem;
-      min-width: 0;
-      transition: padding 0.3s ease;
-    }
-
-    .main-content h1 {
-      font-size: 2.5rem;
-      font-weight: 700;
-      letter-spacing: -0.03em;
-      color: #0f0f23;
-      margin-bottom: 0.5rem;
-    }
-
-    .main-content p {
-      font-size: 0.9rem;
-      color: #64748b;
-    }
-
-    /* ════════════════════════════════════════════════════════════════════════════
-       CHAT PANEL — remove everything between these markers to strip the feature
-       ════════════════════════════════════════════════════════════════════════════ */
-
-    /* ─── Chat Aside ────────────────────────────────────────────────────────── */
-    .chat-aside {
-      width: 0;
-      flex-shrink: 0;
-      overflow: hidden;
-      background: #ffffff;
-      border-left: 1px solid #e2e8f0;
-      display: flex;
-      flex-direction: row;
-      transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      box-shadow: -4px 0 24px rgba(0, 0, 0, 0.06);
-      position: relative;
-    }
-
-    .app-shell.chat-open .chat-aside {
-      width: 400px;
-      min-width: 280px;
-    }
-
-    /* Disable the slide transition while the user is actively dragging */
-    .chat-aside.is-resizing {
-      transition: none;
-    }
-
-    /* ─── Resize handle ─────────────────────────────────────────────────────── */
-    .chat-resize-handle {
-      position: absolute;
-      left: 0;
-      top: 0;
-      bottom: 0;
-      width: 6px;
-      cursor: col-resize;
-      z-index: 10;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .chat-resize-handle::after {
-      content: '';
-      width: 2px;
-      height: 32px;
-      border-radius: 1px;
-      background: #cbd5e1;
-      transition: background 0.15s, height 0.15s;
-    }
-
-    .chat-resize-handle:hover::after,
-    .chat-aside.is-resizing .chat-resize-handle::after {
-      background: #6366f1;
-      height: 48px;
-    }
-
-    /* ─── Chat Inner Layout ─────────────────────────────────────────────────── */
-    .chat-inner {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      flex: 1;
-      min-width: 0;
-      padding-left: 6px; /* leave room for the resize handle */
-    }
-
-    .chat-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 1rem 1.25rem;
-      border-bottom: 1px solid #f1f5f9;
-      background: #fff;
-      flex-shrink: 0;
-    }
-
-    .chat-header-title {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.875rem;
-      font-weight: 600;
-      color: #0f0f23;
-    }
-
-    .chat-header-title .dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #22c55e;
-      box-shadow: 0 0 0 2px #dcfce7;
-      flex-shrink: 0;
-    }
-
-    .chat-header-actions {
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-    }
-
-    .chat-mode-btn {
-      border: 1px solid #dbe4f0;
-      background: #f8fafc;
-      color: #475569;
-      border-radius: 999px;
-      padding: 0.38rem 0.7rem;
-      font-size: 0.75rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.15s, color 0.15s, border-color 0.15s;
-    }
-
-    .chat-mode-btn[data-mode="dev"] {
-      background: #eef2ff;
-      border-color: #c7d2fe;
-      color: #4338ca;
-    }
-
-    .chat-mode-btn:hover {
-      background: #f1f5f9;
-    }
-
-    .chat-mode-btn[data-mode="dev"]:hover {
-      background: #e0e7ff;
-    }
-
-    .chat-action-btn {
-      background: none;
-      border: none;
-      cursor: pointer;
-      padding: 0.3rem;
-      border-radius: 6px;
-      color: #94a3b8;
-      display: flex;
-      align-items: center;
-      transition: background 0.15s, color 0.15s;
-    }
-
-    .chat-action-btn:hover {
-      background: #f1f5f9;
-      color: #475569;
-    }
-
-    .chat-messages {
-      flex: 1;
-      overflow-y: auto;
-      padding: 1.25rem;
-      display: flex;
-      flex-direction: column;
-      gap: 1rem;
+    #conversation {
+      flex: 1 1 auto; overflow-y: auto; padding-top: 52px;
       scroll-behavior: smooth;
     }
+    #conversation::-webkit-scrollbar { width: 10px; }
+    #conversation::-webkit-scrollbar-thumb { background: #e0e0e0; border-radius: 5px; }
 
-    .chat-messages::-webkit-scrollbar { width: 4px; }
-    .chat-messages::-webkit-scrollbar-track { background: transparent; }
-    .chat-messages::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 2px; }
-
-    .chat-welcome {
-      text-align: center;
-      padding: 2rem 1rem;
-      color: #94a3b8;
+    #messages {
+      max-width: 50rem; margin: 0 auto; padding: 1rem 1rem 1.5rem;
+      display: flex; flex-direction: column; gap: 1.25rem;
     }
 
-    .chat-welcome svg {
-      opacity: 0.4;
-      margin-bottom: 0.75rem;
+    #hero {
+      text-align: center; font-size: 1.75rem; font-weight: 600;
+      letter-spacing: -0.02em; padding: 0 1rem 1.5rem;
     }
 
-    .chat-welcome p {
-      font-size: 0.8125rem;
-      line-height: 1.5;
+    /* Empty state centers the hero + composer block vertically */
+    body.empty #main { justify-content: center; }
+    body.empty #conversation { flex: 0 0 auto; padding-top: 0; }
+    body:not(.empty) #hero { display: none; }
+
+    /* ─── Messages ────────────────────────────────────────────────────────── */
+    .msg { display: flex; flex-direction: column; max-width: 100%; }
+    .msg.user { align-items: flex-end; }
+    .msg.assistant { align-items: flex-start; }
+
+    .msg .bubble { max-width: 90%; line-height: 1.6; font-size: 0.95rem; word-break: break-word; }
+    .msg.user .bubble {
+      background: var(--user-bubble); padding: 0.65rem 0.95rem;
+      border-radius: 1.25rem; border-bottom-right-radius: 0.35rem;
+    }
+    .msg.assistant .bubble { padding: 0.1rem 0.1rem; }
+
+    .msg .images { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.4rem; justify-content: flex-end; }
+    .msg .images img { max-width: 220px; max-height: 220px; border-radius: 0.75rem; border: 1px solid var(--line); }
+
+    .bubble.is-speaking { position: relative; }
+    .bubble.is-speaking::after {
+      content: ''; display: inline-block; width: 14px; height: 14px; margin-left: 6px;
+      vertical-align: -2px;
+      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230d0d0d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='11 5 6 9 2 9 2 15 6 15 11 19 11 5'/%3E%3Cpath d='M15.54 8.46a5 5 0 0 1 0 7.07'/%3E%3C/svg%3E") no-repeat center/contain;
+      animation: pulse 1.1s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:.5} 50%{opacity:1} }
+
+    .cursor {
+      display: inline-block; width: 8px; height: 1.05em; background: var(--fg);
+      border-radius: 1px; vertical-align: -2px; margin-left: 2px;
+      animation: blink 1s step-start infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+    /* Markdown */
+    .bubble p { margin: 0 0 0.6em; } .bubble p:last-child { margin-bottom: 0; }
+    .bubble h1,.bubble h2,.bubble h3,.bubble h4 { font-weight: 650; margin: 0.7em 0 0.3em; line-height: 1.3; }
+    .bubble h1 { font-size: 1.3em; } .bubble h2 { font-size: 1.15em; } .bubble h3 { font-size: 1.02em; }
+    .bubble ul,.bubble ol { padding-left: 1.4em; margin: 0.4em 0; }
+    .bubble li { margin: 0.2em 0; }
+    .bubble code { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.85em; background: #f1f1f1; border-radius: 5px; padding: 0.1em 0.35em; }
+    .bubble pre { background: #0d0d0d; color: #f4f4f4; border-radius: 12px; padding: 0.85rem 1rem; overflow-x: auto; margin: 0.6em 0; }
+    .bubble pre code { background: none; padding: 0; color: inherit; }
+    .bubble a { color: #0b57d0; text-decoration: underline; text-underline-offset: 2px; }
+    .bubble blockquote { border-left: 3px solid var(--line); padding-left: 0.8em; color: var(--muted); margin: 0.4em 0; }
+    .bubble table { border-collapse: collapse; margin: 0.5em 0; }
+    .bubble th, .bubble td { border: 1px solid var(--line); padding: 0.3em 0.6em; text-align: left; }
+
+    /* ─── Composer ────────────────────────────────────────────────────────── */
+    #composer { flex: 0 0 auto; width: 100%; max-width: 50rem; margin: 0 auto; padding: 0 1rem 1.25rem; }
+
+    #image-previews { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0 0.5rem 0.6rem; }
+    .thumb { position: relative; width: 56px; height: 56px; border-radius: 0.6rem; overflow: hidden; border: 1px solid var(--line); }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .thumb button {
+      position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; border-radius: 50%;
+      border: none; background: rgba(0,0,0,0.6); color: #fff; cursor: pointer; font-size: 11px;
+      line-height: 1; display: flex; align-items: center; justify-content: center;
     }
 
-    /* ─── Message Bubbles ───────────────────────────────────────────────────── */
-    .msg {
-      display: flex;
-      max-width: 100%;
+    .bar {
+      display: flex; align-items: flex-end; gap: 0.35rem;
+      background: var(--bar-bg); border-radius: 1.6rem; box-shadow: var(--bar-shadow);
+      padding: 0.5rem 0.55rem;
     }
 
-    .msg.user { justify-content: flex-end; }
-
-    .msg-bubble {
-      padding: 0.625rem 0.875rem;
-      border-radius: 14px;
-      font-size: 0.875rem;
-      line-height: 1.55;
-      max-width: 88%;
-      word-break: break-word;
+    #input {
+      flex: 1 1 auto; border: none; outline: none; background: transparent; resize: none;
+      font-family: inherit; font-size: 1rem; color: var(--fg); line-height: 1.5;
+      max-height: 200px; min-height: 24px; padding: 0.4rem 0.4rem;
     }
+    #input::placeholder { color: var(--muted); }
 
-    .msg.user .msg-bubble {
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
-      color: #fff;
-      border-bottom-right-radius: 4px;
+    .icon-btn {
+      flex-shrink: 0; width: 38px; height: 38px; border-radius: 50%; border: none; cursor: pointer;
+      background: none; color: var(--fg); display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s;
     }
+    .icon-btn:hover { background: #f0f0f0; }
+    .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; background: none; }
 
-    .msg.assistant .msg-bubble {
-      background: #f8fafc;
-      color: #1e293b;
-      border: 1px solid #f1f5f9;
-      border-bottom-left-radius: 4px;
+    #send-btn { background: var(--accent); color: #fff; }
+    #send-btn:hover { opacity: 0.85; background: var(--accent); }
+
+    #mic-btn.recording { background: #fde8e8; color: var(--danger); animation: micpulse 1.4s ease-in-out infinite; }
+    @keyframes micpulse { 0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.3)} 50%{box-shadow:0 0 0 5px rgba(239,68,68,0)} }
+
+    /* Dictation stop button doubles as a loudness indicator (size scales with volume) */
+    .stop-btn { background: #fde8e8; color: var(--danger); transition: transform 0.09s ease-out; transform-origin: center; }
+    .stop-btn:hover { background: #fbd5d5; }
+
+    .voice-btn {
+      flex-shrink: 0; width: 38px; height: 38px; border-radius: 50%; border: none; cursor: pointer;
+      background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center;
+      transition: transform 0.1s, background 0.15s;
     }
+    .voice-btn:hover { transform: scale(1.05); }
+    .voice-btn.active { background: var(--danger); animation: micpulse 1.4s ease-in-out infinite; }
+    /* While a voice conversation is active, show a stop square (stays red). */
+    .voice-btn .icon-stop { display: none; }
+    .voice-btn.active .icon-voice { display: none; }
+    .voice-btn.active .icon-stop { display: block; }
 
-    /* ─── Streaming cursor ──────────────────────────────────────────────────── */
-    .chat-cursor {
-      display: inline-block;
-      width: 2px;
-      height: 0.9em;
-      background: #94a3b8;
-      border-radius: 1px;
-      vertical-align: text-bottom;
-      margin-left: 2px;
-      animation: blink 0.7s step-start infinite;
+    /* Audio visualizer (during voice conversation) — spans the full input width */
+    .viz { display: none; align-items: center; justify-content: space-between; gap: 2px; height: 28px; flex: 1 1 auto; min-width: 0; padding: 0 1.5rem; }
+    .viz.active { display: flex; }
+    .viz-bar { flex: 1 1 auto; max-width: 8px; min-height: 3px; border-radius: 3px; background: #d4d4d8; align-self: center; transition: height 0.06s ease-out; }
+    .viz-bar.signal { background: var(--accent); }
+
+    /* Active tool-call status (one line, at the bottom of the current response) */
+    .tool-status { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; color: var(--muted); padding: 0.35rem 0.1rem; }
+    .tool-status .spinner { width: 13px; height: 13px; border: 2px solid var(--line); border-top-color: var(--muted); border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Chips */
+    .chips { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; padding: 0.7rem 0 0; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;
+      border: 1px solid var(--chip-line); background: var(--bg); color: #4b4b4b;
+      border-radius: 999px; padding: 0.45rem 0.85rem; font-size: 0.82rem; transition: background 0.15s, border-color 0.15s, color 0.15s;
     }
+    .chip:hover { background: #f7f7f7; }
+    .chip.active { background: #0d0d0d; color: #fff; border-color: #0d0d0d; }
+    .chip svg { width: 15px; height: 15px; }
 
-    @keyframes blink {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: 0; }
+    .hint { text-align: center; font-size: 0.72rem; color: var(--muted); padding-top: 0.6rem; }
+
+    @media (max-width: 640px) {
+      #messages { padding: 1rem 0.6rem 1.5rem; }
+      #composer { padding: 0 0.6rem 1.25rem; }
+      #hero { font-size: 1.4rem; }
     }
-
-    /* ─── TTS playback indicator ─────────────────────────────────────────────── */
-    .msg-bubble.is-speaking {
-      position: relative;
-      border-color: #a5b4fc;
-      box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.15);
-    }
-
-    .msg-bubble.is-speaking::before {
-      content: '';
-      position: absolute;
-      top: 0.5rem;
-      right: 0.5rem;
-      width: 18px;
-      height: 18px;
-      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236366f1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='11 5 6 9 2 9 2 15 6 15 11 19 11 5'/%3E%3Cpath d='M15.54 8.46a5 5 0 0 1 0 7.07'/%3E%3Cpath d='M19.07 4.93a10 10 0 0 1 0 14.14'/%3E%3C/svg%3E") no-repeat center/contain;
-      animation: tts-pulse 1.2s ease-in-out infinite;
-    }
-
-    @keyframes tts-pulse {
-      0%, 100% { opacity: 0.6; transform: scale(1); }
-      50%      { opacity: 1;   transform: scale(1.1); }
-    }
-
-    /* ─── Markdown content (assistant bubbles) ──────────────────────────────── */
-    .msg.assistant .msg-bubble-body { color: #1e293b; }
-
-    .msg.assistant .msg-bubble-body p          { margin-bottom: 0.5em; }
-    .msg.assistant .msg-bubble-body p:last-child { margin-bottom: 0; }
-
-    .msg.assistant .msg-bubble-body h1,
-    .msg.assistant .msg-bubble-body h2,
-    .msg.assistant .msg-bubble-body h3,
-    .msg.assistant .msg-bubble-body h4         {
-      font-size: 0.9375em;
-      font-weight: 600;
-      margin: 0.6em 0 0.25em;
-    }
-
-    .msg.assistant .msg-bubble-body ul,
-    .msg.assistant .msg-bubble-body ol         { padding-left: 1.35em; margin: 0.3em 0; }
-    .msg.assistant .msg-bubble-body li         { margin: 0.2em 0; }
-
-    .msg.assistant .msg-bubble-body code       {
-      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
-      font-size: 0.8125em;
-      background: #e8edf5;
-      border-radius: 4px;
-      padding: 0.1em 0.35em;
-    }
-
-    .msg.assistant .msg-bubble-body pre        {
-      background: #1e293b;
-      border-radius: 8px;
-      padding: 0.75rem 1rem;
-      overflow-x: auto;
-      margin: 0.5em 0;
-    }
-
-    .msg.assistant .msg-bubble-body pre code   {
-      background: none;
-      padding: 0;
-      color: #e2e8f0;
-      font-size: 0.8125em;
-    }
-
-    .msg.assistant .msg-bubble-body blockquote {
-      border-left: 3px solid #6366f1;
-      padding-left: 0.75em;
-      color: #64748b;
-      margin: 0.3em 0;
-    }
-
-    .msg.assistant .msg-bubble-body a          {
-      color: #6366f1;
-      text-decoration: underline;
-      text-underline-offset: 2px;
-    }
-
-    .msg.assistant .msg-bubble-body hr         {
-      border: none;
-      border-top: 1px solid #e2e8f0;
-      margin: 0.5em 0;
-    }
-
-    .msg.assistant .msg-bubble-body th         { text-align: left; }
-
-    /* ─── Chat Footer ───────────────────────────────────────────────────────── */
-    .chat-footer {
-      padding: 0.875rem 1.25rem;
-      border-top: 1px solid #f1f5f9;
-      background: #fff;
-      flex-shrink: 0;
-    }
-
-    .chat-input-row {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      background: #f8fafc;
-      border: 1px solid #e2e8f0;
-      border-radius: 14px;
-      padding: 0.5rem 0.25rem 0.5rem 0.875rem;
-      transition: border-color 0.15s, box-shadow 0.15s;
-    }
-
-    .chat-input-row:focus-within {
-      border-color: #6366f1;
-      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
-    }
-
-    .chat-input {
-      flex: 1;
-      border: none;
-      background: transparent;
-      font-size: 0.875rem;
-      color: #1e293b;
-      resize: none;
-      outline: none;
-      line-height: 1.5;
-      max-height: 120px;
-      min-height: 22px;
-      font-family: inherit;
-    }
-
-    .chat-input::placeholder { color: #94a3b8; }
-
-    .chat-send-btn {
-      width: 32px;
-      height: 32px;
-      border-radius: 10px;
-      border: none;
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
-      color: #fff;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-      transition: opacity 0.15s, transform 0.1s;
-    }
-
-    .chat-send-btn:hover { opacity: 0.9; transform: scale(1.05); }
-    .chat-send-btn:active { transform: scale(0.95); }
-    .chat-send-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-
-    /* ─── Mic Button ────────────────────────────────────────────────────────── */
-    .chat-mic-btn {
-      width: 32px;
-      height: 32px;
-      border-radius: 10px;
-      border: none;
-      background: #f1f5f9;
-      color: #64748b;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-      transition: background 0.15s, color 0.15s, box-shadow 0.2s;
-    }
-
-    .chat-mic-btn:hover {
-      background: #e2e8f0;
-      color: #475569;
-    }
-
-    .chat-mic-btn.is-active {
-      background: #fee2e2;
-      color: #ef4444;
-      box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
-      animation: pulse-mic 1.5s ease-in-out infinite;
-    }
-
-    @keyframes pulse-mic {
-      0%, 100% { box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2); }
-      50%      { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.1); }
-    }
-
-    /* ─── Audio Level Visualizer ────────────────────────────────────────────── */
-    .audio-viz {
-      display: none;
-      align-items: center;
-      gap: 3px;
-      height: 22px;
-      padding: 0 4px;
-      flex: 1;
-      min-width: 0;
-    }
-
-    .audio-viz.is-active {
-      display: flex;
-    }
-
-    .audio-viz-bar {
-      flex: 1;
-      max-width: 4px;
-      min-height: 3px;
-      border-radius: 2px;
-      background: #e2e8f0;
-      transition: height 0.06s ease-out, background 0.12s;
-      align-self: center;
-    }
-
-    .audio-viz-bar.has-signal {
-      background: linear-gradient(0deg, #6366f1, #8b5cf6);
-    }
-
-    .audio-viz-bar.is-loud {
-      background: linear-gradient(0deg, #6366f1, #ef4444);
-    }
-
-    .audio-viz-label {
-      font-size: 0.7rem;
-      color: #94a3b8;
-      white-space: nowrap;
-      margin-right: 6px;
-      user-select: none;
-    }
-
-    /* ─── Chat Toggle Button ────────────────────────────────────────────────── */
-    .chat-toggle-btn {
-      position: fixed;
-      bottom: 1.5rem;
-      right: 1.5rem;
-      width: 52px;
-      height: 52px;
-      border-radius: 50%;
-      border: none;
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
-      color: #fff;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
-      transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s, opacity 0.3s;
-      z-index: 100;
-    }
-
-    .chat-toggle-btn:hover {
-      transform: scale(1.1);
-      box-shadow: 0 6px 28px rgba(99, 102, 241, 0.5);
-    }
-
-    .chat-toggle-btn:active { transform: scale(0.96); }
-
-    .app-shell.chat-open .chat-toggle-btn {
-      opacity: 0;
-      pointer-events: none;
-    }
-
-    .chat-toggle-btn .icon-chat { display: block; }
-    .chat-toggle-btn .icon-close { display: none; }
-
-    @media (max-width: 768px) {
-      html, body {
-        overflow: auto;
-      }
-
-      .app-shell {
-        display: block;
-        min-height: 100vh;
-        height: auto;
-        width: 100%;
-      }
-
-      .main-content {
-        min-height: 100vh;
-        padding: 2rem 1.25rem 6rem;
-      }
-
-      .chat-aside {
-        position: fixed;
-        left: 0;
-        right: 0;
-        top: 0;
-        bottom: 0;
-        width: 100%;
-        height: 100dvh;
-        border-left: none;
-        border-top: none;
-        border-radius: 0;
-        box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.12);
-        transform: translateY(100%);
-        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        z-index: 90;
-      }
-
-      .app-shell.chat-open .chat-aside {
-        width: 100%;
-        min-width: 0;
-        height: 100dvh;
-        transform: translateY(0);
-      }
-
-      .chat-resize-handle {
-        display: none;
-      }
-
-      .chat-inner {
-        height: 100%;
-        padding-left: 0;
-      }
-
-      .chat-header {
-        padding: 1rem 1rem;
-      }
-
-      #chat-close-btn {
-        width: 36px;
-        height: 36px;
-        border-radius: 50%;
-        background: #f1f5f9;
-        color: #475569;
-      }
-
-      .chat-messages {
-        padding: 1rem;
-      }
-
-      .chat-footer {
-        padding: 0.75rem 1rem 1rem;
-      }
-
-      .chat-toggle-btn {
-        right: 1rem;
-        bottom: 1rem;
-      }
-    }
-
-    /* ═══════════════════════════ END CHAT PANEL ════════════════════════════ */
   </style>
 
-  <!-- ════════════ CHAT IMPORTS — remove with the rest of the chat panel ════════════ -->
   <script>window.__CHAT_API_KEY__ = {{ chat_api_key | tojson }};</script>
   <script type="importmap">
   {
@@ -610,107 +213,73 @@
     }
   }
   </script>
-  <!-- ══════════════════════════════════════════════════════════════════════════════ -->
 </head>
-<body>
+<body class="empty">
 
-<div class="app-shell" id="app-shell">
+  <div class="topbar">
+    <div class="brand">Assistant</div>
+    <div class="actions">
+      <button id="new-chat-btn" title="New chat">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+        New chat
+      </button>
+    </div>
+  </div>
 
-  <!-- ─── Main Content ──────────────────────────────────────────────────── -->
-  <main class="main-content">
-    <h1>hello</h1>
-    <p>v{{ version }} (deployed {{ deploy_date }})</p>
-  </main>
+  <div id="main">
+    <div id="conversation">
+      <div id="messages">
+        <h1 id="hero">What's on the agenda today?</h1>
+      </div>
+    </div>
 
-  <!-- ════════════════════════════════════════════════════════════════════════
-       CHAT PANEL — remove this <aside> and the toggle <button> below,
-       plus the <style id="chat-styles"> block and <script id="chat-script">
-       to fully strip the chat feature.
-       ════════════════════════════════════════════════════════════════════════ -->
-  <aside class="chat-aside" id="chat-aside" aria-label="AI Chat">
-    <div class="chat-resize-handle" id="chat-resize-handle" aria-hidden="true"></div>
-    <div class="chat-inner">
+    <div id="composer">
+      <div id="image-previews"></div>
 
-      <header class="chat-header">
-        <div class="chat-header-title">
-          <span class="dot"></span>
-          AI Assistant
-        </div>
-        <div class="chat-header-actions">
-          <button class="chat-mode-btn" id="chat-mode-btn" type="button" data-mode="user" aria-label="Switch to dev mode" title="Switch to dev mode">
-            User mode
-          </button>
-          <button class="chat-action-btn" id="chat-clear-btn" aria-label="Clear history" title="Clear history">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M2 3.5h10M5 3.5V2.5a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 .5.5v1M3 3.5l.7 7.5a.5.5 0 0 0 .5.5h5.6a.5.5 0 0 0 .5-.5L11 3.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </button>
-          <button class="chat-action-btn" id="chat-close-btn" aria-label="Close chat" title="Close">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-          </button>
-        </div>
-      </header>
+      <div class="bar">
+        <button id="attach-btn" class="icon-btn" title="Attach image" aria-label="Attach image">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
 
-      <div class="chat-messages" id="chat-messages">
-        <div class="chat-welcome" id="chat-welcome">
-          <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
-            <rect width="36" height="36" rx="18" fill="#6366f1" opacity="0.12"/>
-            <path d="M10 14h16M10 18h10M10 22h12" stroke="#6366f1" stroke-width="1.75" stroke-linecap="round"/>
-          </svg>
-          <p>Ask me anything.<br>I'm here to help.</p>
-        </div>
+        <textarea id="input" rows="1" placeholder="Ask anything" aria-label="Message"></textarea>
+
+        <div class="viz" id="viz" aria-hidden="true"></div>
+
+        <button id="mic-btn" class="icon-btn" title="Dictate" aria-label="Dictate">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        </button>
+
+        <button id="stop-btn" class="icon-btn stop-btn" title="Stop dictation" aria-label="Stop dictation" style="display:none">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+        </button>
+
+        <button id="send-btn" class="icon-btn" title="Send" aria-label="Send" style="display:none" disabled>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
+
+        <button id="voice-btn" class="voice-btn" title="Voice conversation" aria-label="Voice conversation">
+          <svg class="icon-voice" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="9" x2="6" y2="15"/><line x1="10" y1="5" x2="10" y2="19"/><line x1="14" y1="8" x2="14" y2="16"/><line x1="18" y1="10" x2="18" y2="14"/></svg>
+          <svg class="icon-stop" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+        </button>
       </div>
 
-      <footer class="chat-footer">
-        <div class="chat-input-row">
-          <textarea
-            class="chat-input"
-            id="chat-input"
-            placeholder="Message…"
-            rows="1"
-            aria-label="Chat message"
-          ></textarea>
-          <div class="audio-viz" id="audio-viz">
-            <span class="audio-viz-label">Listening</span>
-          </div>
-          <button class="chat-mic-btn" id="chat-mic-btn" aria-label="Toggle speech mode" title="Speech mode">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <rect x="5.5" y="1" width="5" height="9" rx="2.5" stroke="currentColor" stroke-width="1.25" fill="none"/>
-              <path d="M3 7.5a5 5 0 0 0 10 0" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" fill="none"/>
-              <line x1="8" y1="12.5" x2="8" y2="15" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
-              <line x1="5.5" y1="15" x2="10.5" y2="15" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
-            </svg>
-          </button>
-          <button class="chat-send-btn" id="chat-send-btn" aria-label="Send message" disabled>
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M14 2L2 7.5l5 1.5 1.5 5L14 2z" fill="currentColor"/>
-            </svg>
-          </button>
-        </div>
-      </footer>
+      <div class="chips">
+        <button class="chip" id="chip-web" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/></svg>
+          Web search
+        </button>
+        <button class="chip" id="chip-research" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2h6M10 2v6.5L5 18a2 2 0 0 0 1.8 3h10.4A2 2 0 0 0 19 18l-5-9.5V2"/></svg>
+          Deep research
+        </button>
+      </div>
 
+      <div class="hint" id="hint"></div>
+
+      <input type="file" id="file-input" accept="image/*" multiple hidden>
     </div>
-  </aside>
-  <!-- ═══════════════════════════ END CHAT ASIDE ═══════════════════════════ -->
+  </div>
 
-  <!-- ════════════════ CHAT TOGGLE BUTTON ════════════════ -->
-  <button class="chat-toggle-btn" id="chat-toggle-btn" aria-label="Open chat">
-    <svg class="icon-chat" width="22" height="22" viewBox="0 0 22 22" fill="none">
-      <path d="M4 4h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H7l-4 3V5a1 1 0 0 1 1-1z"
-            stroke="currentColor" stroke-width="1.75" stroke-linejoin="round" fill="none"/>
-    </svg>
-  </button>
-  <!-- ═══════════════════════════════════════════════════════════════ -->
-
-</div><!-- /.app-shell -->
-
-<!-- ════════════════════════════════════════════════════════════════════════════
-     CHAT SCRIPT — remove this tag together with the aside and toggle button
-     ════════════════════════════════════════════════════════════════════════════ -->
-<script type="module" src="/static/chat/chat.js"></script>
-<!-- ═══════════════════════════ END CHAT SCRIPT ══════════════════════════ -->
-
+  <script type="module" src="/static/chat/chat.js"></script>
 </body>
 </html>

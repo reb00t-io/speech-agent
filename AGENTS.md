@@ -49,14 +49,15 @@ All commands listed here must work.
 - Speech WebSocket: `src/speech.py` (handler for `/ws/speech`)
 
 **Key configuration locations:**
-- `config/user_system_prompt.json` — User mode AI system prompt template
-- `config/dev_system_prompt.json` — Dev mode AI system prompt template
+- `config/system_prompt.json` — The single AI system prompt template (`{{docs}}` is replaced with `docs/app_docs.md`)
 - `.envrc` — Environment variables (PORT, LLM_MODEL, ASR_MODEL, AUTH_MODE)
 - `docker-compose.yml` — Container environment passthrough
 
+Note: there is no longer a user/dev mode distinction — one system prompt and one tool set (`tool_schemas.get_tools()`) are used for all conversations. Text chat goes through the tool-capable `generate_stream`; the dual-LLM `dual_stream` is used only by the speech WebSocket.
+
 ## 4. Definition of Done
 For any change, the following must hold:
-- [ ] All existing tests pass (`pytest` — 77 tests)
+- [ ] All existing tests pass (`pytest` — 140 tests)
 - [ ] New tests added for new functionality
 - [ ] No regressions in text chat mode when modifying speech mode (and vice versa)
 - [ ] Docs updated if behavior or environment variables change
@@ -127,10 +128,10 @@ Things that are easy to break:
 
 ### Example: Add a new tool
 - Files to edit:
-  - `src/tool_schemas.py` (define the tool schema, add to appropriate mode)
-  - `src/tool_executor.py` (implement execution)
+  - `src/tool_schemas.py` (define the tool schema, add it to `ALL_TOOLS`)
+  - `src/tool_executor.py` (implement execution in `execute_tool_call`)
 - Tests to add:
-  - `test/test_main.py` (tool availability per mode, execution test)
+  - `test/test_main.py` (tool availability + execution test)
 - Commands to run:
   - `pytest test/test_main.py`
 

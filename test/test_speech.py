@@ -36,6 +36,7 @@ def _make_pcm_silence(duration_s: float) -> bytes:
 @pytest.fixture(autouse=True)
 def reset_sessions(tmp_path, monkeypatch):
     monkeypatch.setattr("src.speech.AUDIO_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setattr("src.speech.MISTRAL_API_KEY", "")  # disable TTS; covered by test_tts_integration.py
     sessions.clear()
     session_modes.clear()
     last_session_ids.clear()
@@ -130,6 +131,7 @@ async def test_websocket_pause_triggers_llm(ws_client):
             yield chunk
 
     mock_resp = MagicMock()
+    mock_resp.status_code = 200
     mock_resp.raise_for_status = MagicMock()
     mock_resp.aiter_raw = mock_aiter_raw
     mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
@@ -141,7 +143,7 @@ async def test_websocket_pause_triggers_llm(ws_client):
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
     with patch("src.speech.transcribe", asr_mock), \
-         patch("src.speech.httpx.AsyncClient", return_value=mock_client):
+         patch("src.dual_llm.httpx.AsyncClient", return_value=mock_client):
         async with ws_client.websocket("/ws/speech?mode=user") as ws:
             await ws.receive()  # session_start
 
@@ -172,6 +174,37 @@ async def test_websocket_pause_triggers_llm(ws_client):
         assert "Why" in tokens
 
 
+async def test_dictation_mode_streams_transcript_without_llm(ws_client):
+    """In dictation mode, transcripts stream but the LLM is never invoked."""
+    asr_mock = AsyncMock(return_value="take a note")
+    llm_client = MagicMock()  # would raise if used (no proper async ctx setup)
+
+    with patch("src.speech.transcribe", asr_mock), \
+         patch("src.dual_llm.httpx.AsyncClient", return_value=llm_client):
+        async with ws_client.websocket("/ws/speech?dictation=1") as ws:
+            await ws.receive()  # session_start
+
+            await ws.send(_make_pcm_tone(0.5))
+            for _ in range(6):
+                await ws.send(_make_pcm_silence(0.1))
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.4)
+            await ws.send(json.dumps({"type": "stop"}))
+
+            messages = []
+            try:
+                while True:
+                    raw = await asyncio.wait_for(ws.receive(), timeout=2.0)
+                    messages.append(json.loads(raw))
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    types = [m.get("type") for m in messages]
+    assert "transcript" in types          # transcripts streamed
+    assert "transcript_done" in types     # pause finalized
+    assert "llm_token" not in types       # but the LLM never ran
+
+
 async def test_websocket_stop_without_audio(ws_client):
     """Sending stop immediately should work without errors."""
     async with ws_client.websocket("/ws/speech?mode=user") as ws:
@@ -188,4 +221,3 @@ async def test_websocket_creates_session_in_store(ws_client):
         await ws.send(json.dumps({"type": "stop"}))
 
     assert sid in sessions
-    assert session_modes[sid] == "user"

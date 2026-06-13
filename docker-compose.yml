@@ -7,11 +7,16 @@ services:
       - LLM_API_KEY=${LLM_API_KEY}
       - LLM_MODEL=${LLM_MODEL}
       - ASR_MODEL=${ASR_MODEL}
+      - ASR_LANGUAGE=${ASR_LANGUAGE}
       - API_KEY=${API_KEY}
       - MISTRAL_API_KEY=${MISTRAL_API_KEY}
       - TTS_MODEL=${TTS_MODEL}
       - TTS_VOICE=${TTS_VOICE}
+      - BARGE_IN_THRESHOLD_RMS=${BARGE_IN_THRESHOLD_RMS}
+      - BARGE_IN_MIN_MS=${BARGE_IN_MIN_MS}
       - SESSIONS_PATH=/data/sessions.json
+      - REQUEST_LOG_PATH=/data/requests.log
+      - DOWNLOADS_DIR=/data/downloads
     ports:
       - "${PORT}:${PORT}"
     volumes:

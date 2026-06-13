@@ -13,9 +13,11 @@ from typing import Any
 import aiohttp
 
 try:
+    from .documents import publish_markdown
     from .runtime_logs import get_backend_logs, normalize_log_limit
     from .web_tools import fetch_url, normalize_max_chars, normalize_max_results, web_search
 except ImportError:
+    from documents import publish_markdown
     from runtime_logs import get_backend_logs, normalize_log_limit
     from web_tools import fetch_url, normalize_max_chars, normalize_max_results, web_search
 
@@ -191,6 +193,13 @@ async def execute_tool_call(session: aiohttp.ClientSession, tool_call: dict[str,
         if not code:
             return {"error": "Missing required argument: code"}
         return await run_python(code, normalize_timeout_seconds(fn_args.get("timeout_seconds", 20)))
+
+    if fn_name == "publish_document":
+        markdown_text = str(fn_args.get("markdown") or "")
+        if not markdown_text.strip():
+            return {"error": "Missing required argument: markdown"}
+        title = str(fn_args.get("title") or "").strip()
+        return publish_markdown(markdown_text, title)
 
     if fn_name == "get_logs":
         system = str(fn_args.get("system") or "").strip()

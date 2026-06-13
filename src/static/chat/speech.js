@@ -2,9 +2,10 @@
  * SpeechSession — manages mic capture and WebSocket communication for speech mode.
  */
 export class SpeechSession {
-    constructor({ sessionId = null, mode = 'user' } = {}) {
+    constructor({ sessionId = null, mode = 'user', dictation = false } = {}) {
         this.sessionId = sessionId;
         this.mode = mode;
+        this.dictation = dictation;
         this.ws = null;
         this.stream = null;
         this.audioCtx = null;
@@ -41,6 +42,7 @@ export class SpeechSession {
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const params = new URLSearchParams({ mode: this.mode });
         if (this.sessionId) params.set('session_id', this.sessionId);
+        if (this.dictation) params.set('dictation', '1');
         const url = `${proto}//${location.host}/ws/speech?${params}`;
 
         this.ws = new WebSocket(url);
@@ -186,6 +188,10 @@ export class SpeechSession {
                 this._stopTTS();
                 this.onLLMCancelled?.(msg.partial_response);
                 break;
+            case 'stop_audio':
+                // Server detected barge-in after the LLM finished; stop playback.
+                this._stopTTS();
+                break;
             case 'tts_audio':
                 this._enqueueTTS(msg.audio_base64);
                 break;
@@ -202,17 +208,25 @@ export class SpeechSession {
         }
     }
 
+    /** Notify UI and server when TTS playback starts or stops. */
+    _notifyPlayback(playing) {
+        this.onTTSPlaybackChange?.(playing);
+        if (this.ws?.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ type: 'playback_state', playing }));
+        }
+    }
+
     async _playNextTTS() {
         if (!this._ttsQueue.length) {
             this._ttsPlaying = false;
             this._ttsSource = null;
             this._ttsCtx = null;
-            this.onTTSPlaybackChange?.(false);
+            this._notifyPlayback(false);
             return;
         }
         const wasPlaying = this._ttsPlaying;
         this._ttsPlaying = true;
-        if (!wasPlaying) this.onTTSPlaybackChange?.(true);
+        if (!wasPlaying) this._notifyPlayback(true);
 
         const base64 = this._ttsQueue.shift();
         try {
@@ -252,6 +266,6 @@ export class SpeechSession {
         try { this._ttsCtx?.close(); } catch { /* ignore */ }
         this._ttsSource = null;
         this._ttsCtx = null;
-        if (wasPlaying) this.onTTSPlaybackChange?.(false);
+        if (wasPlaying) this._notifyPlayback(false);
     }
 }

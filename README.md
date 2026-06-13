@@ -2,16 +2,19 @@
 
 A chat agent with speech mode — talk to an LLM through your browser's microphone. Audio streams to the backend in real time, gets transcribed via ASR, and triggers streaming LLM responses on speech pauses. Supports interruption and continuation: if you start speaking while the LLM is responding, it stops and picks up where it left off after your next pause.
 
+A single ChatGPT-style assistant: one full-page chat interface with text, image upload, dictation, and live voice conversation. There is no user/dev mode — every conversation uses the same system prompt and the full tool set.
+
 ## Features
 
 - **Text chat** — type messages, get streamed LLM responses with markdown rendering
-- **Speech mode** — click the mic button to talk; audio is chunked, transcribed, and sent to the LLM
-- **Interruption handling** — speak while the LLM is responding to cancel it; on the next pause it continues from where it stopped
-- **Smart audio chunking** — ~2s chunks with silence-boundary detection for clean ASR input
-- **Pause detection** — 0.4s of silence after speech triggers the LLM
-- **Tool calling** — the LLM can execute bash, python, web search, and other tools (mode-dependent)
+- **Voice conversation** — the round voice button starts a live, hands-free conversation (real-time ASR + spoken TTS replies); start speaking again to interrupt it
+- **Dictation** — the mic button transcribes speech into the text box (`POST /v1/transcribe`) so you can edit before sending
+- **Image upload** — attach images with the "+" button; they are sent to the model as base64 vision input
+- **Web search shortcut** — toggle to instruct the model to use the `web_search` tool before answering
+- **Deep research shortcut** — toggle to have the model research thoroughly and deliver a downloadable PDF report (via the `publish_document` tool)
+- **Tool calling** — `web_search`, `fetch_url`, `python`, `bash`, `get_logs`, and `publish_document` (Markdown → PDF download link)
+- **Interruption handling** — speak while the assistant is responding (text or voice) to cancel it; on the next pause it continues from where it stopped
 - **Session persistence** — conversations are saved to disk and restored on reload
-- **User/Dev modes** — different system prompts, tools, and documentation per mode
 - **Auth** — optional password or API key authentication
 
 ## Quick Start
@@ -36,11 +39,18 @@ docker compose up
 | `PORT` | yes | — | Server port |
 | `LLM_BASE_URL` | yes | — | Base URL for LLM and ASR APIs (OpenAI-compatible) |
 | `LLM_API_KEY` | no | `""` | API key for the LLM/ASR backend |
-| `LLM_MODEL` | no | `gpt-oss-120b` | Model for chat completions |
-| `ASR_MODEL` | no | `whisper-1` | Model for speech recognition |
+| `LLM_MODEL` | no | `gpt-oss-120b` | Model for chat completions (image input requires a vision-capable model, e.g. Kimi) |
+| `ASR_MODEL` | no | `whisper-1` | Model for speech recognition (voice + dictation) |
+| `ASR_LANGUAGE` | no | `""` | Optional ASR language hint (empty = auto-detect) |
 | `API_KEY` | no | `""` | Bearer token for client authentication |
 | `AUTH_MODE` | no | `none` | Auth mode: `none`, `password`, `auth0` |
 | `AUTH_PASSWORD` | no | — | Required when `AUTH_MODE=password` |
+| `MISTRAL_API_KEY` | no | `""` | Enables TTS for voice conversation when set |
+| `BARGE_IN_THRESHOLD_RMS` | no | `800` | Min mic loudness (RMS) to interrupt the assistant; raise if its TTS echoes back through the mic |
+| `BARGE_IN_MIN_MS` | no | `400` | Min duration of sustained loud audio before a barge-in fires (filters brief echo blips) |
+| `SESSIONS_PATH` | no | `data/sessions.json` | Where chat history is persisted |
+| `REQUEST_LOG_PATH` | no | `data/requests.log` | Request/response log file |
+| `DOWNLOADS_DIR` | no | `data/downloads` | Where `publish_document` PDFs are stored and served from `/download/<token>.pdf` |
 
 ## Project Structure
 
@@ -51,22 +61,21 @@ src/
   audio_chunking.py    # Audio chunker with silence detection
   asr.py               # ASR client (OpenAI-compatible transcription API)
   streaming.py         # SSE streaming for text chat, tool orchestration
-  tool_schemas.py      # Tool definitions per mode
-  tool_executor.py     # Tool execution (bash, python, web tools)
+  documents.py         # Markdown → PDF publishing + secure download paths
+  tool_schemas.py      # Tool definitions (single shared tool set)
+  tool_executor.py     # Tool execution (bash, python, web tools, publish_document)
   web_tools.py         # Web search and URL fetching
   runtime_logs.py      # In-memory log capture
   templates/
-    index.html         # Page shell + chat panel HTML/CSS
+    index.html         # Full-page chat UI (HTML/CSS)
   static/chat/
-    chat.js            # Chat panel logic + speech mode integration
-    speech.js          # SpeechSession class (WebSocket + mic capture)
+    chat.js            # Chat UI logic: streaming, images, dictation, voice, chips
+    speech.js          # SpeechSession class (WebSocket + mic capture for voice)
     pcm-processor.js   # AudioWorklet for PCM capture
 config/
-  dev_system_prompt.json   # Dev mode AI system prompt
-  user_system_prompt.json  # User mode AI system prompt
+  system_prompt.json   # The single AI system prompt
 docs/
-  dev_docs.md              # Developer documentation (injected into dev prompt)
-  user_docs.md             # User documentation (injected into user prompt)
+  app_docs.md              # App documentation (injected into the system prompt)
   speech_mode_spec.md      # High-level speech mode spec
   speech_mode_detailed_spec.md  # Detailed speech mode spec
 scripts/
@@ -116,4 +125,4 @@ pytest test/test_main.py             # 33 tests — text chat, auth, sessions, t
 docker compose up
 ```
 
-The `docker-compose.yml` passes through `PORT`, `LLM_BASE_URL`, `LLM_API_KEY`, `ASR_MODEL`, and `API_KEY` from your environment.
+The `docker-compose.yml` passes through `PORT`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `ASR_MODEL`, `ASR_LANGUAGE`, `API_KEY`, `MISTRAL_API_KEY`, and the TTS settings from your environment, and persists sessions, request logs, and published PDFs under the mounted `/data` volume.

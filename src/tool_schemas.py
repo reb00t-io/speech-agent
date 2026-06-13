@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-DEFAULT_MODE = "user"
-DEV_MODE = "dev"
-USER_MODE = "user"
-
 BASH_TOOL = {
     "type": "function",
     "function": {
@@ -130,11 +126,42 @@ GET_LOGS_TOOL = {
     },
 }
 
-DEV_TOOLS = [BASH_TOOL, PYTHON_TOOL, WEB_SEARCH_TOOL, FETCH_URL_TOOL, GET_LOGS_TOOL]
-USER_TOOLS = [PYTHON_TOOL, WEB_SEARCH_TOOL, FETCH_URL_TOOL]
+PUBLISH_DOCUMENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "publish_document",
+        "description": (
+            "Convert a Markdown document into a PDF, store it, and return a secure "
+            "download link. Use this to deliver long-form documents — such as a "
+            "research report — to the user. Pass the complete document as Markdown."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "markdown": {
+                    "type": "string",
+                    "description": "The full document content in Markdown.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Optional title shown in the PDF.",
+                },
+            },
+            "required": ["markdown"],
+        },
+    },
+}
+
+ALL_TOOLS = [
+    WEB_SEARCH_TOOL,
+    FETCH_URL_TOOL,
+    PYTHON_TOOL,
+    BASH_TOOL,
+    GET_LOGS_TOOL,
+    PUBLISH_DOCUMENT_TOOL,
+]
 
 
-def get_tools_for_mode(mode: str) -> list[dict]:
-    if mode == DEV_MODE:
-        return DEV_TOOLS
-    return USER_TOOLS
+def get_tools() -> list[dict]:
+    """Return the full tool set available to the assistant."""
+    return ALL_TOOLS

@@ -22,6 +22,36 @@ MAX_TOOL_CALL_ROUNDS = 10
 
 logger = logging.getLogger(__name__)
 
+WEB_SEARCH_INSTRUCTION = (
+    "Web search is enabled for this message. Use the web_search tool (and fetch_url to "
+    "read promising results) to gather current information before answering, and cite the "
+    "sources you used."
+)
+
+DEEP_RESEARCH_INSTRUCTION = (
+    "Deep research is enabled for this message. Investigate the user's request thoroughly: "
+    "use web_search and fetch_url for sources, and python or bash for any analysis or data "
+    "work. Then compile a well-structured, comprehensive report in Markdown and call the "
+    "publish_document tool with the full Markdown to produce a downloadable PDF. Finally, "
+    "reply with the download link and a concise summary of the findings."
+)
+
+MAX_IMAGES = 8
+
+
+def _build_user_content(prompt: str, images: list[str]) -> str | list[dict]:
+    """Build OpenAI-style message content, multimodal when images are attached."""
+    valid_images = [
+        img for img in images
+        if isinstance(img, str) and img.startswith("data:image/")
+    ][:MAX_IMAGES]
+    if not valid_images:
+        return prompt
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for image_url in valid_images:
+        content.append({"type": "image_url", "image_url": {"url": image_url}})
+    return content
+
 
 def _split_stream_text(text: str, size: int = 3) -> list[str]:
     if len(text) <= size:
@@ -73,9 +103,25 @@ def build_frontend_tool_request(session_id: str, tool_call: dict[str, Any]) -> d
     }
 
 
+def _content_to_text(content) -> str:
+    """Flatten message content (possibly multimodal) to plain text for display."""
+    if isinstance(content, list):
+        texts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
+        text = " ".join(t for t in texts if t).strip()
+        has_image = any(isinstance(part, dict) and part.get("type") == "image_url" for part in content)
+        if has_image:
+            return (text + " [image]").strip()
+        return text
+    return content if isinstance(content, str) else ""
+
+
 def visible_messages(messages: list[dict]) -> list[dict]:
     visible_roles = {"user", "assistant"}
-    return [message for message in messages if message.get("role") in visible_roles and message.get("content")]
+    out: list[dict] = []
+    for message in messages:
+        if message.get("role") in visible_roles and message.get("content"):
+            out.append({"role": message["role"], "content": _content_to_text(message["content"])})
+    return out
 
 
 def _merge_tool_call_delta(state: StreamState, tool_call_delta: dict) -> None:
@@ -188,9 +234,26 @@ def append_tool_result_messages(messages: list[dict], tool_results: list[dict]) 
         )
 
 
+def _tool_status_event(tool_call: dict | None) -> bytes:
+    """SSE event announcing the currently-running backend tool (or clearing it)."""
+    if tool_call is None:
+        return emit_event(json.dumps({"tool_status": None}, separators=(",", ":")))
+    fn = tool_call.get("function") or {}
+    return emit_event(json.dumps(
+        {"tool_status": {"name": fn.get("name", ""), "arguments": _parse_tool_arguments(tool_call) or {}}},
+        separators=(",", ":"),
+    ))
+
+
 async def execute_backend_tool_round(messages: list[dict], tool_calls: list[dict]):
+    """Execute backend tools, streaming a 'currently running' status for each.
+
+    Yields SSE bytes (one running status per tool, then a clear) so the client
+    can show the active tool call at the bottom of the response.
+    """
     async with aiohttp.ClientSession() as session:
         for tool_call in tool_calls:
+            yield _tool_status_event(tool_call)
             tool_result = await execute_tool_call(session, tool_call)
             messages.append(
                 {
@@ -199,6 +262,7 @@ async def execute_backend_tool_round(messages: list[dict], tool_calls: list[dict
                     "content": json.dumps(tool_result, ensure_ascii=False),
                 }
             )
+    yield _tool_status_event(None)
 
 
 async def generate_dual_stream(
@@ -290,7 +354,8 @@ async def generate_stream(
                 frontend_tool_calls, backend_tool_calls = split_frontend_tool_calls(tool_calls)
 
                 if backend_tool_calls:
-                    await execute_backend_tool_round(messages, backend_tool_calls)
+                    async for outbound in execute_backend_tool_round(messages, backend_tool_calls):
+                        yield outbound
 
                 if frontend_tool_calls:
                     for tool_call in frontend_tool_calls:
@@ -345,12 +410,11 @@ async def post_chat_response(
     *,
     body: dict,
     sessions: dict[str, list[dict]],
-    session_modes: dict[str, str],
     api_key: str,
     authorization: str,
-    load_system_prompt: Callable[[str], str],
+    load_system_prompt: Callable[[], str],
     save_sessions: Callable[[], None],
-    on_session_start: Callable[[str, str], None] | None = None,
+    on_session_start: Callable[[str], None] | None = None,
     tools: list[dict] | None = None,
     client_factory,
     llm_base_url: str,
@@ -366,47 +430,42 @@ async def post_chat_response(
     if not prompt and not tool_results:
         return jsonify({"error": "prompt or tool_results is required"}), 400
 
-    mode = body.get("mode") or "user"
+    raw_images = body.get("images")
+    images: list[str] = raw_images if isinstance(raw_images, list) else []
+    web_search_enabled = bool(body.get("web_search"))
+    deep_research_enabled = bool(body.get("deep_research"))
+
     session_id = body.get("session_id") or secrets.token_urlsafe(16)
     if prompt and on_session_start:
-        on_session_start(session_id, mode)
+        on_session_start(session_id)
 
     if session_id not in sessions:
         if tool_results:
             return jsonify({"error": "session_id is required for tool_results and must refer to an existing session"}), 400
-        sessions[session_id] = [{"role": "system", "content": load_system_prompt(mode)}]
-        session_modes[session_id] = mode
-    else:
-        session_modes.setdefault(session_id, mode)
+        sessions[session_id] = [{"role": "system", "content": load_system_prompt()}]
     messages = sessions[session_id]
     if prompt:
-        messages.append({"role": "user", "content": prompt})
+        # Per-message capability hints, requested by the UI shortcuts.
+        if deep_research_enabled:
+            messages.append({"role": "system", "content": DEEP_RESEARCH_INSTRUCTION})
+        elif web_search_enabled:
+            messages.append({"role": "system", "content": WEB_SEARCH_INSTRUCTION})
+        messages.append({"role": "user", "content": _build_user_content(prompt, images)})
     if tool_results:
         append_tool_result_messages(messages, tool_results)
 
-    # Use dual-LLM for fresh prompts (not tool result continuations)
-    if prompt and not tool_results and callable(generate_dual_stream):
-        generator = generate_dual_stream(
-            messages=messages,
-            save_sessions=save_sessions,
-            llm_base_url=llm_base_url,
-            llm_api_key=llm_api_key,
-            llm_model=llm_model,
-            stream_pace_seconds=stream_pace_seconds,
-        )
-    else:
-        llm_body = {"model": llm_model, "stream": True, "messages": messages}
-        generator = generate_stream(
-            messages=messages,
-            save_sessions=save_sessions,
-            client_factory=client_factory,
-            llm_base_url=llm_base_url,
-            llm_api_key=llm_api_key,
-            llm_body=llm_body,
-            stream_pace_seconds=stream_pace_seconds,
-            tools=tools or [],
-            session_id=session_id,
-        )
+    llm_body = {"model": llm_model, "stream": True, "messages": messages}
+    generator = generate_stream(
+        messages=messages,
+        save_sessions=save_sessions,
+        client_factory=client_factory,
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        llm_body=llm_body,
+        stream_pace_seconds=stream_pace_seconds,
+        tools=tools or [],
+        session_id=session_id,
+    )
 
     return Response(
         generator,

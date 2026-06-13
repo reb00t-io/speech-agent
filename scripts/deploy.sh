@@ -20,9 +20,9 @@ SSH_OPTS=(-p "$REMOTE_PORT" -o ConnectTimeout=10 -o ServerAliveInterval=5 -o Ser
 
 print_remote_diagnostics() {
   ssh "${SSH_OPTS[@]}" "$REMOTE" '
-    docker ps -a --filter "name=bootstrap-template" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+    docker ps -a --filter "name='"$IMAGE_NAME"'" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
     echo
-    docker logs --tail 80 bootstrap-template 2>/dev/null || true
+    docker logs --tail 80 '"$IMAGE_NAME"' 2>&1 | tail -80 || true
   ' || true
 }
 
@@ -58,6 +58,14 @@ printf -v llm_base_url_q '%q' "$LLM_BASE_URL"
 printf -v llm_api_key_q '%q' "$LLM_API_KEY"
 printf -v api_key_q '%q' "$API_KEY"
 printf -v auth_password_q '%q' "$AUTH_PASSWORD"
+printf -v llm_model_q '%q' "${LLM_MODEL:-}"
+printf -v asr_model_q '%q' "${ASR_MODEL:-}"
+printf -v mistral_api_key_q '%q' "${MISTRAL_API_KEY:-}"
+printf -v tts_model_q '%q' "${TTS_MODEL:-}"
+printf -v tts_voice_q '%q' "${TTS_VOICE:-}"
+printf -v asr_language_q '%q' "${ASR_LANGUAGE:-}"
+printf -v barge_in_threshold_q '%q' "${BARGE_IN_THRESHOLD_RMS:-}"
+printf -v barge_in_min_ms_q '%q' "${BARGE_IN_MIN_MS:-}"
 if ! container_id=$(ssh "${SSH_OPTS[@]}" "$REMOTE" 'bash -se' <<EOF
 set -euo pipefail
 image_name=$image_name_q
@@ -66,10 +74,28 @@ llm_base_url=$llm_base_url_q
 llm_api_key=$llm_api_key_q
 api_key=$api_key_q
 auth_password=$auth_password_q
+llm_model=$llm_model_q
+asr_model=$asr_model_q
+mistral_api_key=$mistral_api_key_q
+tts_model=$tts_model_q
+tts_voice=$tts_voice_q
+asr_language=$asr_language_q
+barge_in_threshold=$barge_in_threshold_q
+barge_in_min_ms=$barge_in_min_ms_q
 data_dir="\$HOME/.bootstrap-template/data"
 
-docker stop --time 2 "\$image_name" 2>/dev/null || true
-docker rm "\$image_name" 2>/dev/null || true
+extra_env=()
+if [ -n "\$llm_model" ]; then extra_env+=(-e LLM_MODEL="\$llm_model"); fi
+if [ -n "\$asr_model" ]; then extra_env+=(-e ASR_MODEL="\$asr_model"); fi
+if [ -n "\$asr_language" ]; then extra_env+=(-e ASR_LANGUAGE="\$asr_language"); fi
+if [ -n "\$mistral_api_key" ]; then extra_env+=(-e MISTRAL_API_KEY="\$mistral_api_key"); fi
+if [ -n "\$tts_model" ]; then extra_env+=(-e TTS_MODEL="\$tts_model"); fi
+if [ -n "\$tts_voice" ]; then extra_env+=(-e TTS_VOICE="\$tts_voice"); fi
+if [ -n "\$barge_in_threshold" ]; then extra_env+=(-e BARGE_IN_THRESHOLD_RMS="\$barge_in_threshold"); fi
+if [ -n "\$barge_in_min_ms" ]; then extra_env+=(-e BARGE_IN_MIN_MS="\$barge_in_min_ms"); fi
+
+docker stop -t 2 "\$image_name" > /dev/null 2>&1 || true
+docker rm "\$image_name" > /dev/null 2>&1 || true
 docker run -d \
   -p "\$port:\$port" \
   -e PORT="\$port" \
@@ -79,6 +105,9 @@ docker run -d \
   -e AUTH_MODE=password \
   -e AUTH_PASSWORD="\$auth_password" \
   -e SESSIONS_PATH=/data/sessions.json \
+  -e REQUEST_LOG_PATH=/data/requests.log \
+  -e DOWNLOADS_DIR=/data/downloads \
+  \${extra_env[@]+"\${extra_env[@]}"} \
   -v "\$data_dir:/data" \
   --name "\$image_name" \
   --restart unless-stopped \

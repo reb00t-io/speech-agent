@@ -19,6 +19,11 @@
 ```
 Signals the user has stopped speech mode. Backend finalizes any pending audio chunk and processes remaining transcript.
 
+```json
+{"type": "playback_state", "playing": true}
+```
+Reports whether the frontend is currently playing TTS audio. The backend uses this to barge-in (stop playback) when the user resumes speaking *after* the LLM has already finished but buffered speech is still playing in the browser.
+
 ### Server → Client Messages (JSON Text Frames)
 
 | `type` | Fields | Description |
@@ -28,6 +33,8 @@ Signals the user has stopped speech mode. Backend finalizes any pending audio ch
 | `llm_token` | `token` | A single token from the LLM streaming response |
 | `llm_done` | — | LLM finished its response |
 | `llm_cancelled` | `partial_response` | LLM was cancelled because user resumed speaking |
+| `tts_audio` | `index`, `audio_base64` | Synthesized speech for one sentence (base64 WAV) |
+| `stop_audio` | — | Barge-in after the LLM finished: stop playing any buffered TTS audio |
 | `error` | `message` | Error message |
 
 ## 2. Backend Components

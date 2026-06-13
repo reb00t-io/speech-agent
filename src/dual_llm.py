@@ -8,6 +8,10 @@ Every user query is processed by three concurrent subsystems:
 The user only sees System 1 output. For trivial queries (score ≤ 2),
 System 1's direct answer is used. For complex queries, System 2 thinks
 deeply and System 1 progressively presents that thinking to the user.
+
+Reasoning depth is requested via the OpenAI ``reasoning_effort`` parameter,
+except for Kimi models which instead toggle ``chat_template_kwargs.thinking``
+(see ``_apply_reasoning_effort``).
 """
 
 from __future__ import annotations
@@ -58,6 +62,27 @@ S1_PRESENT_FINAL = (
 
 
 # ─── Low-level LLM helpers ──────────────────────────────────────────────────
+
+
+def _is_kimi_model(model: str) -> bool:
+    """Whether *model* is a Kimi model (which toggles reasoning differently)."""
+    return "kimi" in model.lower()
+
+
+def _apply_reasoning_effort(body: dict[str, Any], model: str, reasoning_effort: str | None) -> None:
+    """Set the request field(s) controlling reasoning depth for *model*.
+
+    Most OpenAI-compatible models accept ``reasoning_effort``. Kimi rejects it
+    and instead toggles thinking via ``chat_template_kwargs={"thinking": bool}``.
+    We map a "low" effort to thinking disabled (the fast path) and anything else
+    to thinking enabled, so the fast/deep contrast the dual-LLM design relies on
+    is preserved on Kimi regardless of its server-side default.
+    """
+    if _is_kimi_model(model):
+        body.setdefault("chat_template_kwargs", {})["thinking"] = reasoning_effort != "low"
+        return
+    if reasoning_effort:
+        body["reasoning_effort"] = reasoning_effort
 
 
 async def _iter_sse_tokens(
@@ -114,8 +139,7 @@ async def _llm_stream_tokens(
     final streaming chunk.
     """
     body: dict[str, Any] = {"model": model, "stream": True, "messages": messages}
-    if reasoning_effort:
-        body["reasoning_effort"] = reasoning_effort
+    _apply_reasoning_effort(body, model, reasoning_effort)
     if response_format:
         body["response_format"] = response_format
     if usage_out is not None:

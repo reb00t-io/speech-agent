@@ -12,6 +12,7 @@ os.environ.setdefault("LLM_API_KEY", "test-key")
 
 from src.dual_llm import (
     COMPLEXITY_THRESHOLD,
+    _apply_reasoning_effort,
     _count_sentences,
     _extract_first_sentence,
     _route,
@@ -96,6 +97,40 @@ def test_extract_first_sentence_question():
 
 def test_extract_first_sentence_no_punct():
     assert _extract_first_sentence("Hello world") == "Hello world"
+
+
+# ─── Reasoning-effort mapping ────────────────────────────────────────────────
+
+def test_reasoning_effort_openai_low():
+    body = {}
+    _apply_reasoning_effort(body, "gpt-oss-120b", "low")
+    assert body == {"reasoning_effort": "low"}
+
+
+def test_reasoning_effort_openai_default_sets_nothing():
+    body = {}
+    _apply_reasoning_effort(body, "gpt-oss-120b", None)
+    assert body == {}
+
+
+def test_reasoning_effort_kimi_low_disables_thinking():
+    body = {}
+    _apply_reasoning_effort(body, "kimi-k2", "low")
+    assert body == {"chat_template_kwargs": {"thinking": False}}
+    assert "reasoning_effort" not in body
+
+
+def test_reasoning_effort_kimi_deep_enables_thinking():
+    body = {}
+    _apply_reasoning_effort(body, "Kimi-K2-Instruct", None)
+    assert body == {"chat_template_kwargs": {"thinking": True}}
+    assert "reasoning_effort" not in body
+
+
+def test_reasoning_effort_kimi_preserves_existing_template_kwargs():
+    body = {"chat_template_kwargs": {"foo": "bar"}}
+    _apply_reasoning_effort(body, "kimi-k2", "low")
+    assert body == {"chat_template_kwargs": {"foo": "bar", "thinking": False}}
 
 
 # ─── Router ──────────────────────────────────────────────────────────────────
