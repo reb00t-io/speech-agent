@@ -707,3 +707,10 @@ async def test_app_root_redirects_keep_prefix(monkeypatch):
     resp = await main_module.app.test_client().get("/")  # unauthenticated
     assert resp.status_code == 302
     assert resp.headers["Location"].endswith("/agent/login")
+
+
+async def test_health_is_open_and_ok(client):
+    resp = await client.get("/health")
+    assert resp.status_code == 200
+    data = await resp.get_json()
+    assert data["status"] == "ok" and data["service"] == "speech-agent"

@@ -334,6 +334,17 @@ def _load_system_prompt() -> str:
     return template.replace("{{docs}}", docs)
 
 
+@app.route("/health")
+async def health():
+    """Unauthenticated liveness probe (nginx/deploy health checks)."""
+    return jsonify({
+        "status": "ok",
+        "service": "speech-agent",
+        "version": VERSION,
+        "deployed": DEPLOY_DATE,
+    })
+
+
 @app.route("/favicon.ico")
 async def favicon():
     from quart import Response
