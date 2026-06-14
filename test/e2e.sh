@@ -11,6 +11,8 @@ fi
 docker compose up -d
 trap 'docker compose down' EXIT
 
+health_url="http://localhost:${PORT}/health"
+
 echo "waiting for server..."
 wait_timeout_seconds=120
 wait_interval_seconds=2
@@ -20,7 +22,7 @@ last_status=""
 
 while (( SECONDS < deadline )); do
   attempt=$((attempt + 1))
-  status=$(curl -sS -o /dev/null -w "%{http_code}" "http://localhost:${PORT}" || true)
+  status=$(curl -sS -o /dev/null -w "%{http_code}" "$health_url" || true)
   last_status="$status"
 
   if [ "$status" = "200" ]; then
@@ -49,17 +51,23 @@ if [ "$last_status" != "200" ]; then
   exit 1
 fi
 
-echo "checking response..."
-body=$(curl -sf http://localhost:"$PORT")
+echo "checking health response..."
+body=$(curl -sf "$health_url")
 
-if ! echo "$body" | grep -q "hello"; then
-  echo "FAIL: response does not contain 'hello'"
+if ! echo "$body" | grep -q "speech-agent"; then
+  echo "FAIL: health response does not look right"
   echo "$body"
   exit 1
 fi
 
 echo "checking deploy date..."
-deploy_date=$(echo "$body" | sed -n 's/.*deployed \([^)]*\).*/\1/p')
+deploy_date=$(echo "$body" | sed -n 's/.*"deployed"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if [ -z "$deploy_date" ]; then
+  echo "FAIL: could not find deploy date in health response"
+  echo "$body"
+  exit 1
+fi
+
 if deploy_ts=$(date -u -d "$deploy_date" +%s 2>/dev/null); then
   : # GNU date (Linux)
 elif deploy_ts=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$deploy_date" +%s 2>/dev/null); then
@@ -75,6 +83,15 @@ if [ "$age" -gt 300 ]; then
   echo "FAIL: deploy date is ${age}s old (max 300s)"
   exit 1
 fi
-
 echo "deploy date is ${age}s old, ok"
+
+echo "checking app page renders..."
+page_status=$(curl -sS -o /dev/null -w "%{http_code}" "http://localhost:${PORT}/" || true)
+# 200 when the page is served (AUTH_MODE=none); 302 when it redirects to /login.
+if [ "$page_status" != "200" ] && [ "$page_status" != "302" ]; then
+  echo "FAIL: app page returned HTTP ${page_status}"
+  docker compose logs --tail 50 || true
+  exit 1
+fi
+
 echo "e2e test passed"

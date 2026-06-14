@@ -40,8 +40,10 @@ TTS_VOICE = os.environ.get("TTS_VOICE", "en_paul_neutral")
 # positives from the assistant's own TTS bleeding back through the mic, a
 # barge-in requires audio that is both LOUDER than BARGE_IN_THRESHOLD_RMS and
 # SUSTAINED for at least BARGE_IN_MIN_MS — a brief echo blip won't qualify.
-BARGE_IN_THRESHOLD_RMS = float(os.environ.get("BARGE_IN_THRESHOLD_RMS", "800"))
-BARGE_IN_MIN_MS = float(os.environ.get("BARGE_IN_MIN_MS", "400"))
+# Use `or` so an empty value (e.g. docker-compose passing an unset host var as
+# "") falls back to the default instead of crashing on float("").
+BARGE_IN_THRESHOLD_RMS = float(os.environ.get("BARGE_IN_THRESHOLD_RMS") or 800)
+BARGE_IN_MIN_MS = float(os.environ.get("BARGE_IN_MIN_MS") or 400)
 
 logger.info(
     "Speech module: LLM_BASE_URL=%s ASR_MODEL=%s LLM_MODEL=%s ASR_LANGUAGE=%s barge_in_rms=%.0f barge_in_min_ms=%.0f",
