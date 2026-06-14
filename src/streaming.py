@@ -11,10 +11,11 @@ import aiohttp
 from quart import Response, jsonify
 
 try:
-    from . import llm_engine
+    from . import llm_engine, memory
     from .tool_executor import execute_tool_call
 except ImportError:
     import llm_engine
+    import memory
     from tool_executor import execute_tool_call
 
 MAX_TOOL_CALL_ROUNDS = 10
@@ -247,7 +248,9 @@ async def generate_stream(
         for round_index in range(MAX_TOOL_CALL_ROUNDS):
             state = StreamState(stream_pace_seconds=stream_pace_seconds)
 
-            async for chunk in llm_engine.stream_chat(messages, tools=tools or None):
+            # inject durable long-term memory per request (not persisted into the
+            # session) so the assistant recalls across conversations/restarts
+            async for chunk in llm_engine.stream_chat(memory.inject(messages), tools=tools or None):
                 async for outbound in process_chunk(chunk, state):
                     yield outbound
 
@@ -258,6 +261,8 @@ async def generate_stream(
             messages.append(assistant_message)
 
             if not tool_calls:
+                # record the finished turn into long-term memory (background)
+                memory.observe(memory.last_user_text(messages), assistant_message["content"])
                 yield emit_event("[DONE]")
                 return
 

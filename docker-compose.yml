@@ -17,6 +17,8 @@ services:
       - DUAL_LLM_ENABLED=${DUAL_LLM_ENABLED}
       - LLM_MAX_COMPLETION_TOKENS=${LLM_MAX_COMPLETION_TOKENS}
       - LLM_DEFAULT_REASONING_EFFORT=${LLM_DEFAULT_REASONING_EFFORT}
+      - MEMORY_ENABLED=${MEMORY_ENABLED}
+      - MEMORIZER_DATA_DIR=/data/memory
       - SESSIONS_PATH=/data/sessions.json
       - REQUEST_LOG_PATH=/data/requests.log
       - DOWNLOADS_DIR=/data/downloads

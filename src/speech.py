@@ -12,12 +12,14 @@ import time
 from quart import websocket
 
 try:
+    from . import memory
     from .asr import transcribe
     from .audio_chunking import AudioChunker, BYTES_PER_SAMPLE, SAMPLE_RATE, is_silent, rms_int16, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from .audio_recording import AudioRecorder
     from .dual_llm import dual_stream, single_stream
     from .tts import split_sentences, synthesize as tts_synthesize, wav_to_base64
 except ImportError:
+    import memory
     from asr import transcribe
     from audio_chunking import AudioChunker, BYTES_PER_SAMPLE, SAMPLE_RATE, is_silent, rms_int16, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from audio_recording import AudioRecorder
@@ -231,7 +233,7 @@ async def _stream_llm(state: SpeechState) -> None:
         if tts_enabled:
             emitter_task = asyncio.create_task(_emit_in_order())
 
-        async for token in _voice_llm_stream(list(state.messages)):
+        async for token in _voice_llm_stream(memory.inject(list(state.messages))):
             state.partial_llm_response += token
             await _send_json({"type": "llm_token", "token": token})
 
@@ -256,6 +258,8 @@ async def _stream_llm(state: SpeechState) -> None:
 
         # Full response complete — add to message history
         state.messages.append({"role": "assistant", "content": state.partial_llm_response})
+        # record the finished voice turn into long-term memory (background)
+        memory.observe(memory.last_user_text(state.messages), state.partial_llm_response)
         state.partial_llm_response = ""
         await _send_json({"type": "llm_done"})
 
