@@ -29,103 +29,59 @@ def _sse(*tokens: str) -> list[bytes]:
     return chunks
 
 
-def mock_llm(chunks: list[bytes] | None = None, tokens: tuple[str, ...] | None = None):
-    """Patch both httpx.AsyncClient and dual_stream for text chat tests.
+def _sse_to_chunks(byte_chunks: list[bytes]) -> list[dict]:
+    """Parse a round's SSE byte chunks into OpenAI streaming chunk dicts."""
+    chunks: list[dict] = []
+    for raw in byte_chunks:
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            if not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data == "[DONE]":
+                continue
+            try:
+                chunks.append(json.loads(data))
+            except json.JSONDecodeError:
+                pass
+    return chunks
 
-    Fresh prompts go through dual_stream; tool continuations go through httpx.
-    """
+
+def mock_llm(chunks: list[bytes] | None = None, tokens: tuple[str, ...] | None = None):
+    """Patch the memorizer engine seam (``llm_engine.stream_chat``) for text-chat
+    tests, yielding the given content tokens / SSE chunks as parsed chunk dicts."""
     if tokens is None and chunks is None:
         tokens = ("Hi", " there")
-    if tokens is None:
-        # Extract tokens from SSE chunks
-        tokens = tuple(
-            json.loads(line[6:]).get("choices", [{}])[0].get("delta", {}).get("content", "")
-            for chunk in chunks
-            for line in chunk.decode("utf-8", errors="replace").strip().split("\n")
-            if line.startswith("data: ") and line[6:] != "[DONE]" and json.loads(line[6:]).get("choices", [{}])[0].get("delta", {}).get("content")
-        )
     if chunks is None:
         chunks = _sse(*tokens)
+    chunk_dicts = _sse_to_chunks(chunks)
 
-    async def aiter_raw():
-        for chunk in chunks:
+    async def _stream(messages, *, reasoning_effort=None, tools=None, usage_out=None):
+        for chunk in chunk_dicts:
             yield chunk
 
-    @asynccontextmanager
-    async def _stream(*args, **kwargs):
-        resp = MagicMock()
-        resp.raise_for_status = MagicMock()
-        resp.aiter_raw = aiter_raw
-        yield resp
-
-    @asynccontextmanager
-    async def _client(*args, **kwargs):
-        client = MagicMock()
-        client.stream = _stream
-        yield client
-
-    async def _fake_dual_stream(**kwargs):
-        for t in tokens:
-            yield t
-
-    httpx_patch = patch("src.main.httpx.AsyncClient", _client)
-    dual_patch = patch("src.streaming.dual_stream", _fake_dual_stream)
-
-    class _Combined:
-        def __enter__(self):
-            self._h = httpx_patch.__enter__()
-            self._d = dual_patch.__enter__()
-            return self._h
-        def __exit__(self, *args):
-            dual_patch.__exit__(*args)
-            httpx_patch.__exit__(*args)
-    return _Combined()
+    return patch("src.llm_engine.stream_chat", _stream)
 
 
 def mock_llm_rounds(rounds: list[list[bytes]], *, capture_bodies: list[dict] | None = None):
-    """Patch httpx.AsyncClient for multiple streamed completion rounds.
+    """Patch the engine seam for multiple streamed completion rounds (tool loop).
 
-    Also disables the dual-LLM path so tool-calling tests go through
-    the standard generate_stream pipeline.
+    Each round is a list of SSE byte chunks; they are parsed to chunk dicts and
+    returned one round per ``stream_chat`` call. When *capture_bodies* is given,
+    the messages + tools of each call are recorded.
     """
     round_iter = iter(rounds)
 
-    @asynccontextmanager
-    async def _stream(*args, **kwargs):
+    async def _stream(messages, *, reasoning_effort=None, tools=None, usage_out=None):
         if capture_bodies is not None:
-            json_body = kwargs.get("json")
-            if isinstance(json_body, dict):
-                capture_bodies.append(copy.deepcopy(json_body))
-        chunks = next(round_iter)
+            capture_bodies.append({"messages": copy.deepcopy(list(messages)), "tools": tools})
+        try:
+            byte_chunks = next(round_iter)
+        except StopIteration:
+            byte_chunks = _sse("fallback")
+        for chunk in _sse_to_chunks(byte_chunks):
+            yield chunk
 
-        async def aiter_raw():
-            for chunk in chunks:
-                yield chunk
-
-        resp = MagicMock()
-        resp.raise_for_status = MagicMock()
-        resp.aiter_raw = aiter_raw
-        yield resp
-
-    @asynccontextmanager
-    async def _client(*args, **kwargs):
-        client = MagicMock()
-        client.stream = _stream
-        yield client
-
-    httpx_patch = patch("src.main.httpx.AsyncClient", _client)
-    # Disable dual-LLM so all rounds go through generate_stream
-    dual_patch = patch("src.streaming.generate_dual_stream", None)
-
-    class _Combined:
-        def __enter__(self):
-            self._h = httpx_patch.__enter__()
-            self._d = dual_patch.__enter__()
-            return self._h
-        def __exit__(self, *args):
-            dual_patch.__exit__(*args)
-            httpx_patch.__exit__(*args)
-    return _Combined()
+    return patch("src.llm_engine.stream_chat", _stream)
 
 
 # ─── Fixtures ─────────────────────────────────────────────────────────────────

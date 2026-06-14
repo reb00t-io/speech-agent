@@ -57,7 +57,7 @@ Note: there is no longer a user/dev mode distinction — one system prompt and o
 
 ## 4. Definition of Done
 For any change, the following must hold:
-- [ ] All existing tests pass (`pytest` — 140 tests)
+- [ ] All existing tests pass (`pytest` — 162 tests; a few e2e suites need a reachable LLM backend)
 - [ ] New tests added for new functionality
 - [ ] No regressions in text chat mode when modifying speech mode (and vice versa)
 - [ ] Docs updated if behavior or environment variables change

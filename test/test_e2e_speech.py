@@ -86,30 +86,12 @@ def ws_client():
 
 
 def make_llm_mock(tokens: list[str]):
-    """Create a mock httpx client that streams SSE tokens."""
-    chunks = [
-        f'data: {json.dumps({"choices": [{"delta": {"content": t}}]})}\n\n'.encode()
-        for t in tokens
-    ]
-    chunks.append(b"data: [DONE]\n\n")
+    """Return an ``llm_engine.stream_chat`` replacement that streams *tokens*."""
+    async def _stream(messages, *, reasoning_effort=None, tools=None, usage_out=None):
+        for token in tokens:
+            yield {"choices": [{"delta": {"content": token}}]}
 
-    async def aiter_raw():
-        for c in chunks:
-            yield c
-
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.raise_for_status = MagicMock()
-    mock_resp.aiter_raw = aiter_raw
-    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-    mock_resp.__aexit__ = AsyncMock(return_value=False)
-
-    mock_client = MagicMock()
-    mock_client.stream = MagicMock(return_value=mock_resp)
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-
-    return mock_client
+    return _stream
 
 
 # ─── Audio sample validity ───────────────────────────────────────────────────
@@ -159,7 +141,7 @@ async def test_e2e_hello_world(ws_client):
     llm_mock = make_llm_mock(["Hi", " there", "!"])
 
     with patch("src.speech.transcribe", side_effect=mock_asr), \
-         patch("src.dual_llm.httpx.AsyncClient", return_value=llm_mock):
+         patch("src.llm_engine.stream_chat", llm_mock):
         async with ws_client.websocket("/ws/speech?mode=user") as ws:
             start_msg = json.loads(await ws.receive())
             assert start_msg["type"] == "session_start"
@@ -240,7 +222,7 @@ async def test_e2e_multiple_utterances(ws_client):
     llm_mock = make_llm_mock(["OK"])
 
     with patch("src.speech.transcribe", side_effect=mock_asr), \
-         patch("src.dual_llm.httpx.AsyncClient", return_value=llm_mock):
+         patch("src.llm_engine.stream_chat", llm_mock):
         async with ws_client.websocket("/ws/speech?mode=user") as ws:
             await ws.receive()  # session_start
 
@@ -281,48 +263,22 @@ async def test_e2e_interruption_and_continuation(ws_client):
         asr_calls.append(len(audio_pcm))
         return "test speech"
 
-    # First LLM call returns slowly (simulate being interrupted)
-    slow_chunks = [
-        f'data: {json.dumps({"choices": [{"delta": {"content": "The answer"}}]})}\n\n'.encode(),
-        f'data: {json.dumps({"choices": [{"delta": {"content": " is"}}]})}\n\n'.encode(),
-    ]
-    # Note: no [DONE] — this simulates the LLM being cut off
-
-    fast_chunks = [
-        f'data: {json.dumps({"choices": [{"delta": {"content": " 42."}}]})}\n\n'.encode(),
-        b"data: [DONE]\n\n",
-    ]
-
+    # The first LLM call streams slowly (so a barge-in can interrupt it); later
+    # calls are fast.
     call_count = 0
 
-    def make_dynamic_llm_mock():
+    async def dynamic_stream(messages, *, reasoning_effort=None, tools=None, usage_out=None):
         nonlocal call_count
-
-        async def aiter_raw():
-            nonlocal call_count
-            current_call = call_count
-            call_count += 1
-            chunks = slow_chunks if current_call == 0 else fast_chunks
-            for c in chunks:
-                yield c
-                if current_call == 0:
-                    await asyncio.sleep(0.3)  # slow to allow interruption
-
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.aiter_raw = aiter_raw
-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_resp.__aexit__ = AsyncMock(return_value=False)
-
-        mock_client = MagicMock()
-        mock_client.stream = MagicMock(return_value=mock_resp)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        return mock_client
+        current_call = call_count
+        call_count += 1
+        tokens = ["The answer", " is"] if current_call == 0 else [" 42."]
+        for token in tokens:
+            yield {"choices": [{"delta": {"content": token}}]}
+            if current_call == 0:
+                await asyncio.sleep(0.3)  # slow to allow interruption
 
     with patch("src.speech.transcribe", side_effect=mock_asr), \
-         patch("src.dual_llm.httpx.AsyncClient", side_effect=lambda **kw: make_dynamic_llm_mock()):
+         patch("src.llm_engine.stream_chat", dynamic_stream):
         async with ws_client.websocket("/ws/speech?mode=user") as ws:
             await ws.receive()  # session_start
 

@@ -31,6 +31,15 @@ def _make_pcm_silence(duration_s: float) -> bytes:
     return b"\x00\x00" * n_samples
 
 
+def _patch_stream_chat(*tokens):
+    """Patch the memorizer engine seam to stream the given content tokens."""
+    async def _stream(messages, *, reasoning_effort=None, tools=None, usage_out=None):
+        for token in tokens:
+            yield {"choices": [{"delta": {"content": token}}]}
+
+    return patch("src.llm_engine.stream_chat", _stream)
+
+
 # ─── Fixtures ────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
@@ -119,31 +128,7 @@ async def test_websocket_pause_triggers_llm(ws_client):
     """After a speech pause, the LLM should be triggered."""
     asr_mock = AsyncMock(return_value="tell me a joke")
 
-    # Mock LLM streaming
-    llm_response_chunks = [
-        b'data: {"choices":[{"delta":{"content":"Why"}}]}\n\n',
-        b'data: {"choices":[{"delta":{"content":" did"}}]}\n\n',
-        b'data: [DONE]\n\n',
-    ]
-
-    async def mock_aiter_raw():
-        for chunk in llm_response_chunks:
-            yield chunk
-
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.raise_for_status = MagicMock()
-    mock_resp.aiter_raw = mock_aiter_raw
-    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-    mock_resp.__aexit__ = AsyncMock(return_value=False)
-
-    mock_client = MagicMock()
-    mock_client.stream = MagicMock(return_value=mock_resp)
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-
-    with patch("src.speech.transcribe", asr_mock), \
-         patch("src.dual_llm.httpx.AsyncClient", return_value=mock_client):
+    with patch("src.speech.transcribe", asr_mock), _patch_stream_chat("Why", " did"):
         async with ws_client.websocket("/ws/speech?mode=user") as ws:
             await ws.receive()  # session_start
 
@@ -177,10 +162,13 @@ async def test_websocket_pause_triggers_llm(ws_client):
 async def test_dictation_mode_streams_transcript_without_llm(ws_client):
     """In dictation mode, transcripts stream but the LLM is never invoked."""
     asr_mock = AsyncMock(return_value="take a note")
-    llm_client = MagicMock()  # would raise if used (no proper async ctx setup)
+
+    async def _boom(messages, *, reasoning_effort=None, tools=None, usage_out=None):
+        raise AssertionError("LLM must not be called in dictation mode")
+        yield  # pragma: no cover - makes this an async generator
 
     with patch("src.speech.transcribe", asr_mock), \
-         patch("src.dual_llm.httpx.AsyncClient", return_value=llm_client):
+         patch("src.llm_engine.stream_chat", _boom):
         async with ws_client.websocket("/ws/speech?dictation=1") as ws:
             await ws.receive()  # session_start
 
@@ -252,3 +240,50 @@ async def test_ws_accepts_correct_key(ws_client, monkeypatch):
     async with ws_client.websocket("/ws/speech?mode=user&key=secret") as ws:
         msg = json.loads(await ws.receive())
         assert msg["type"] == "session_start"
+
+
+# ─── Dual-LLM toggle ─────────────────────────────────────────────────────────
+
+def test_voice_llm_engine_respects_dual_toggle(monkeypatch):
+    """_voice_llm_stream picks dual_stream or single_stream based on the toggle."""
+    import src.speech as speech
+
+    chosen = []
+    monkeypatch.setattr(speech, "dual_stream", lambda **kw: chosen.append("dual") or iter(()))
+    monkeypatch.setattr(speech, "single_stream", lambda **kw: chosen.append("single") or iter(()))
+
+    monkeypatch.setattr(speech, "DUAL_LLM_ENABLED", True)
+    speech._voice_llm_stream([{"role": "user", "content": "hi"}])
+
+    monkeypatch.setattr(speech, "DUAL_LLM_ENABLED", False)
+    speech._voice_llm_stream([{"role": "user", "content": "hi"}])
+
+    assert chosen == ["dual", "single"]
+
+
+async def test_pause_triggers_llm_with_dual_disabled(ws_client, monkeypatch):
+    """With dual-LLM disabled, voice mode still streams tokens via single_stream."""
+    monkeypatch.setattr("src.speech.DUAL_LLM_ENABLED", False)
+    asr_mock = AsyncMock(return_value="hi there")
+
+    with patch("src.speech.transcribe", asr_mock), _patch_stream_chat("Hello", " back"):
+        async with ws_client.websocket("/ws/speech?mode=user") as ws:
+            await ws.receive()  # session_start
+            await ws.send(_make_pcm_tone(0.5))
+            for _ in range(6):
+                await ws.send(_make_pcm_silence(0.1))
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.5)
+            await ws.send(json.dumps({"type": "stop"}))
+
+            messages = []
+            try:
+                while True:
+                    raw = await asyncio.wait_for(ws.receive(), timeout=2.0)
+                    messages.append(json.loads(raw))
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    token_msgs = [m for m in messages if m.get("type") == "llm_token"]
+    if token_msgs:
+        assert "Hello" in "".join(m["token"] for m in token_msgs)

@@ -1,9 +1,7 @@
 """Tests for src/dual_llm.py — Dual-LLM 'Thinking Fast and Slow' system."""
 import asyncio
-import json
 import os
-from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -12,7 +10,6 @@ os.environ.setdefault("LLM_API_KEY", "test-key")
 
 from src.dual_llm import (
     COMPLEXITY_THRESHOLD,
-    _apply_reasoning_effort,
     _count_sentences,
     _extract_first_sentence,
     _route,
@@ -23,46 +20,28 @@ from src.dual_llm import (
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
-def _sse_bytes(*tokens: str, done: bool = True) -> list[bytes]:
-    """Build raw SSE byte chunks."""
-    chunks = [
-        f'data: {json.dumps({"choices": [{"delta": {"content": t}}]})}\n\n'.encode()
-        for t in tokens
-    ]
-    if done:
-        chunks.append(b"data: [DONE]\n\n")
-    return chunks
-
-
-def _make_mock_client(responses: list[list[bytes]]):
-    """Create a mock httpx.AsyncClient that returns different responses per call.
-
-    Each entry in `responses` is a list of SSE byte chunks for one stream() call.
+def _seq_stream_chat(token_lists: list[list[str]], captured: list | None = None):
+    """Patch for ``llm_engine.stream_chat``: each call yields the next token
+    list as OpenAI streaming chunk dicts. Calls are sequenced in invocation
+    order (Router, System 1, System 2, ...) the same way the old httpx mock was.
     """
-    call_index = 0
+    calls = iter(token_lists)
 
-    @asynccontextmanager
-    async def _stream(*args, **kwargs):
-        nonlocal call_index
-        idx = call_index
-        call_index += 1
-        chunks = responses[idx] if idx < len(responses) else _sse_bytes("fallback")
+    async def _stream(messages, *, reasoning_effort=None, tools=None, usage_out=None):
+        if captured is not None:
+            captured.append(list(messages))
+        try:
+            tokens = next(calls)
+        except StopIteration:
+            tokens = ["fallback"]
+        for token in tokens:
+            yield {"choices": [{"delta": {"content": token}}]}
 
-        async def aiter_raw():
-            for c in chunks:
-                yield c
+    return _stream
 
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.raise_for_status = MagicMock()
-        resp.aiter_raw = aiter_raw
-        yield resp
 
-    client = MagicMock()
-    client.stream = _stream
-    client.__aenter__ = AsyncMock(return_value=client)
-    client.__aexit__ = AsyncMock(return_value=False)
-    return client
+def _patch_engine(token_lists, captured=None):
+    return patch("src.llm_engine.stream_chat", _seq_stream_chat(token_lists, captured))
 
 
 # ─── Sentence utilities ─────────────────────────────────────────────────────
@@ -99,68 +78,23 @@ def test_extract_first_sentence_no_punct():
     assert _extract_first_sentence("Hello world") == "Hello world"
 
 
-# ─── Reasoning-effort mapping ────────────────────────────────────────────────
-
-def test_reasoning_effort_openai_low():
-    body = {}
-    _apply_reasoning_effort(body, "gpt-oss-120b", "low")
-    assert body == {"reasoning_effort": "low"}
-
-
-def test_reasoning_effort_openai_default_sets_nothing():
-    body = {}
-    _apply_reasoning_effort(body, "gpt-oss-120b", None)
-    assert body == {}
-
-
-def test_reasoning_effort_kimi_low_disables_thinking():
-    body = {}
-    _apply_reasoning_effort(body, "kimi-k2", "low")
-    assert body == {"chat_template_kwargs": {"thinking": False}}
-    assert "reasoning_effort" not in body
-
-
-def test_reasoning_effort_kimi_deep_enables_thinking():
-    body = {}
-    _apply_reasoning_effort(body, "Kimi-K2-Instruct", None)
-    assert body == {"chat_template_kwargs": {"thinking": True}}
-    assert "reasoning_effort" not in body
-
-
-def test_reasoning_effort_kimi_preserves_existing_template_kwargs():
-    body = {"chat_template_kwargs": {"foo": "bar"}}
-    _apply_reasoning_effort(body, "kimi-k2", "low")
-    assert body == {"chat_template_kwargs": {"foo": "bar", "thinking": False}}
-
-
 # ─── Router ──────────────────────────────────────────────────────────────────
 
 async def test_route_parses_complexity():
-    router_response = _sse_bytes('{"complexity": 3}')
-    client = _make_mock_client([router_response])
-
-    score = await _route(
-        client=client, base_url="http://fake", api_key="key",
-        model="test", messages=[{"role": "user", "content": "hello"}],
-    )
+    with _patch_engine([['{"complexity": 3}']]):
+        score = await _route(messages=[{"role": "user", "content": "hello"}])
     assert score == 3
 
 
 async def test_route_clamps_to_range():
-    client = _make_mock_client([_sse_bytes('{"complexity": 15}')])
-    score = await _route(
-        client=client, base_url="http://fake", api_key="key",
-        model="test", messages=[{"role": "user", "content": "hello"}],
-    )
+    with _patch_engine([['{"complexity": 15}']]):
+        score = await _route(messages=[{"role": "user", "content": "hello"}])
     assert score == 10
 
 
 async def test_route_defaults_on_error():
-    client = _make_mock_client([_sse_bytes("not json")])
-    score = await _route(
-        client=client, base_url="http://fake", api_key="key",
-        model="test", messages=[{"role": "user", "content": "hello"}],
-    )
+    with _patch_engine([["not json"]]):
+        score = await _route(messages=[{"role": "user", "content": "hello"}])
     assert score == 5  # default
 
 
@@ -168,13 +102,8 @@ async def test_route_defaults_on_error():
 
 async def test_system2_collects_text():
     s2 = _System2()
-    chunks = _sse_bytes("Hello. ", "World. ", "Done.")
-    client = _make_mock_client([chunks])
-
-    await s2.run(
-        client=client, base_url="http://fake", api_key="key",
-        model="test", messages=[],
-    )
+    with _patch_engine([["Hello. ", "World. ", "Done."]]):
+        await s2.run(messages=[])
     assert s2.done
     assert "Hello" in s2.text
     assert "Done" in s2.text
@@ -183,62 +112,31 @@ async def test_system2_collects_text():
 async def test_system2_wait_for_sentences():
     s2 = _System2()
 
-    # Simulate slow streaming
-    async def slow_stream():
-        chunks = [
-            _sse_bytes("First sentence. ", done=False)[0],
-            _sse_bytes("Second sentence. ", done=False)[0],
-            _sse_bytes("Third sentence.", done=True)[0],
-            b"data: [DONE]\n\n",
-        ]
+    async def slow(messages, *, reasoning_effort=None, tools=None, usage_out=None):
+        for token in ["First sentence. ", "Second sentence. ", "Third sentence."]:
+            yield {"choices": [{"delta": {"content": token}}]}
+            await asyncio.sleep(0.05)
 
-        @asynccontextmanager
-        async def _stream(*args, **kwargs):
-            async def aiter_raw():
-                for c in chunks:
-                    yield c
-                    await asyncio.sleep(0.05)
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.raise_for_status = MagicMock()
-            resp.aiter_raw = aiter_raw
-            yield resp
-
-        client = MagicMock()
-        client.stream = _stream
-        return client
-
-    client = await slow_stream()
-    task = asyncio.create_task(s2.run(
-        client=client, base_url="http://fake", api_key="key",
-        model="test", messages=[],
-    ))
-
-    result = await s2.wait_for_sentences(1, timeout=5.0)
-    assert result
-    assert _count_sentences(s2.text) >= 1
-
-    await task
+    with patch("src.llm_engine.stream_chat", slow):
+        task = asyncio.create_task(s2.run(messages=[]))
+        result = await s2.wait_for_sentences(1, timeout=5.0)
+        assert result
+        assert _count_sentences(s2.text) >= 1
+        await task
 
 
 # ─── dual_stream — trivial path ─────────────────────────────────────────────
 
 async def test_dual_stream_trivial():
     """Score ≤ 2 → System 1's response is streamed directly."""
-    # Responses: [router, system1, system2]
+    # Responses sequenced as: [router, system1, system2]
     responses = [
-        _sse_bytes('{"complexity": 1}'),                    # router
-        _sse_bytes("Hi", " there", "!"),                    # system 1
-        _sse_bytes("Deep", " analysis", " here."),          # system 2 (will be cancelled)
+        ['{"complexity": 1}'],          # router
+        ["Hi", " there", "!"],          # system 1
+        ["Deep", " analysis", " here."],  # system 2 (will be cancelled)
     ]
-
-    with patch("src.dual_llm.httpx.AsyncClient", return_value=_make_mock_client(responses)):
-        tokens = []
-        async for token in dual_stream(
-            messages=[{"role": "user", "content": "hello"}],
-            model="test", base_url="http://fake", api_key="key",
-        ):
-            tokens.append(token)
+    with _patch_engine(responses):
+        tokens = [t async for t in dual_stream(messages=[{"role": "user", "content": "hello"}])]
 
     text = "".join(tokens)
     assert "Hi" in text
@@ -248,19 +146,12 @@ async def test_dual_stream_trivial():
 async def test_dual_stream_trivial_score_2():
     """Score = 2 is still trivial."""
     responses = [
-        _sse_bytes('{"complexity": 2}'),
-        _sse_bytes("Quick", " answer."),
-        _sse_bytes("Deep."),
+        ['{"complexity": 2}'],
+        ["Quick", " answer."],
+        ["Deep."],
     ]
-
-    with patch("src.dual_llm.httpx.AsyncClient", return_value=_make_mock_client(responses)):
-        tokens = []
-        async for token in dual_stream(
-            messages=[{"role": "user", "content": "yes"}],
-            model="test", base_url="http://fake", api_key="key",
-        ):
-            tokens.append(token)
-
+    with _patch_engine(responses):
+        tokens = [t async for t in dual_stream(messages=[{"role": "user", "content": "yes"}])]
     assert "Quick" in "".join(tokens)
 
 
@@ -269,135 +160,61 @@ async def test_dual_stream_trivial_score_2():
 async def test_dual_stream_complex():
     """Score > 2 → System 2 thinks, System 1 presents progressively."""
     responses = [
-        _sse_bytes('{"complexity": 7}'),                                  # router
-        _sse_bytes("Fast", " but", " wrong."),                            # system 1 (discarded)
-        # system 2 (deep thinking)
-        _sse_bytes(
+        ['{"complexity": 7}'],                       # router
+        ["Fast", " but", " wrong."],                 # system 1 (discarded)
+        [                                            # system 2 (deep thinking)
             "Step one analysis. ",
             "Step two analysis. ",
             "Step three analysis. ",
             "Step four analysis. ",
             "Step five analysis. ",
             "Final conclusion.",
-        ),
-        # system 1 present first sentence
-        _sse_bytes("Here's what I found."),
-        # system 1 present next sentence
-        _sse_bytes(" The analysis shows interesting results."),
-        # system 1 complete response
-        _sse_bytes(" In conclusion, everything checks out."),
+        ],
+        ["Here's what I found."],                    # present first
+        [" The analysis shows interesting results."],  # present next
+        [" In conclusion, everything checks out."],  # present final
     ]
-
-    with patch("src.dual_llm.httpx.AsyncClient", return_value=_make_mock_client(responses)):
-        tokens = []
-        async for token in dual_stream(
-            messages=[{"role": "user", "content": "explain quantum computing"}],
-            model="test", base_url="http://fake", api_key="key",
-        ):
-            tokens.append(token)
+    with _patch_engine(responses):
+        tokens = [t async for t in dual_stream(messages=[{"role": "user", "content": "explain quantum computing"}])]
 
     text = "".join(tokens)
-    # Should contain System 1 presenter output, NOT System 2 raw output
     assert "Here's what I found" in text
-    # Should NOT contain System 1's discarded fast response
     assert "Fast" not in text
     assert "wrong" not in text
 
 
 async def test_dual_stream_complex_has_final():
-    """Complex path should include the final completion.
-
-    S2 produces only 2 sentences, so 'present next' is skipped (needs 4 more).
-    The flow is: router → s1(discard) → s2 → present-first → present-final.
-    """
+    """S2 produces only 2 sentences, so 'present next' is skipped."""
     responses = [
-        _sse_bytes('{"complexity": 8}'),
-        _sse_bytes("Quick."),               # s1 discarded
-        _sse_bytes("Deep analysis. Done."), # s2 (2 sentences — not enough for "next")
-        _sse_bytes("Opening."),             # s1 present first
-        # "present next" is skipped since s2 didn't produce 4 more sentences
-        _sse_bytes(" Final answer."),       # s1 complete
+        ['{"complexity": 8}'],
+        ["Quick."],                  # s1 discarded
+        ["Deep analysis. Done."],    # s2 (2 sentences)
+        ["Opening."],                # present first
+        [" Final answer."],          # present final
     ]
-
-    with patch("src.dual_llm.httpx.AsyncClient", return_value=_make_mock_client(responses)):
-        tokens = []
-        async for token in dual_stream(
-            messages=[{"role": "user", "content": "complex question"}],
-            model="test", base_url="http://fake", api_key="key",
-        ):
-            tokens.append(token)
-
-    text = "".join(tokens)
-    assert "Final answer" in text
+    with _patch_engine(responses):
+        tokens = [t async for t in dual_stream(messages=[{"role": "user", "content": "complex question"}])]
+    assert "Final answer" in "".join(tokens)
 
 
 # ─── dual_stream — preserves message format ──────────────────────────────────
 
 async def test_dual_stream_with_system_prompt():
-    """Messages with system prompt should pass through correctly."""
+    """Every LLM call should carry the system prompt prefix (shared context)."""
     messages = [
         {"role": "system", "content": "You are helpful."},
         {"role": "user", "content": "hi"},
     ]
     responses = [
-        _sse_bytes('{"complexity": 1}'),
-        _sse_bytes("Hello!"),
-        _sse_bytes("Deep."),
+        ['{"complexity": 1}'],
+        ["Hello!"],
+        ["Deep."],
     ]
+    captured: list = []
+    with _patch_engine(responses, captured=captured):
+        _ = [t async for t in dual_stream(messages=messages)]
 
-    captured_bodies = []
-    original_make = _make_mock_client
-
-    def capturing_client(resps):
-        client = original_make(resps)
-        original_stream = client.stream
-
-        @asynccontextmanager
-        async def capturing_stream(*args, **kwargs):
-            body = kwargs.get("json") or (args[2] if len(args) > 2 else None)
-            if body:
-                captured_bodies.append(body)
-            async with original_stream(*args, **kwargs) as resp:
-                yield resp
-
-        client.stream = capturing_stream
-        return client
-
-    with patch("src.dual_llm.httpx.AsyncClient", return_value=capturing_client(responses)):
-        tokens = []
-        async for token in dual_stream(
-            messages=messages, model="test",
-            base_url="http://fake", api_key="key",
-        ):
-            tokens.append(token)
-
-    # All LLM calls should include the system prompt
-    for body in captured_bodies:
-        msgs = body.get("messages", [])
+    assert captured  # at least one LLM call was made
+    for msgs in captured:
         assert msgs[0]["role"] == "system"
         assert msgs[0]["content"] == "You are helpful."
-
-
-# ─── Integration with text chat (via mock) ──────────────────────────────────
-
-async def test_dual_stream_used_for_text_chat():
-    """Verify dual_stream can be called the same way for text input."""
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is 2+2?"},
-    ]
-    responses = [
-        _sse_bytes('{"complexity": 1}'),
-        _sse_bytes("4", "."),
-        _sse_bytes("The answer is 4."),
-    ]
-
-    with patch("src.dual_llm.httpx.AsyncClient", return_value=_make_mock_client(responses)):
-        result = []
-        async for token in dual_stream(
-            messages=messages, model="test",
-            base_url="http://fake", api_key="key",
-        ):
-            result.append(token)
-
-    assert "4" in "".join(result)

@@ -15,13 +15,13 @@ try:
     from .asr import transcribe
     from .audio_chunking import AudioChunker, BYTES_PER_SAMPLE, SAMPLE_RATE, is_silent, rms_int16, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from .audio_recording import AudioRecorder
-    from .dual_llm import dual_stream
+    from .dual_llm import dual_stream, single_stream
     from .tts import split_sentences, synthesize as tts_synthesize, wav_to_base64
 except ImportError:
     from asr import transcribe
     from audio_chunking import AudioChunker, BYTES_PER_SAMPLE, SAMPLE_RATE, is_silent, rms_int16, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from audio_recording import AudioRecorder
-    from dual_llm import dual_stream
+    from dual_llm import dual_stream, single_stream
     from tts import split_sentences, synthesize as tts_synthesize, wav_to_base64
 
 logger = logging.getLogger(__name__)
@@ -49,9 +49,24 @@ TTS_VOICE = os.environ.get("TTS_VOICE", "en_paul_neutral")
 BARGE_IN_THRESHOLD_RMS = float(os.environ.get("BARGE_IN_THRESHOLD_RMS") or 800)
 BARGE_IN_MIN_MS = float(os.environ.get("BARGE_IN_MIN_MS") or 400)
 
+# Dual-LLM ("thinking fast and slow") orchestration for voice replies. When
+# disabled, voice mode uses a single plain LLM stream. Default on.
+DUAL_LLM_ENABLED = (os.environ.get("DUAL_LLM_ENABLED") or "true").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _voice_llm_stream(messages: list[dict]):
+    """Pick the voice LLM engine based on the dual-LLM toggle.
+
+    Both stream through the shared memorizer request engine (``llm_engine``);
+    the model/endpoint are configured there from the environment.
+    """
+    engine = dual_stream if DUAL_LLM_ENABLED else single_stream
+    return engine(messages=messages)
+
+
 logger.info(
-    "Speech module: LLM_BASE_URL=%s ASR_MODEL=%s LLM_MODEL=%s ASR_LANGUAGE=%s barge_in_rms=%.0f barge_in_min_ms=%.0f",
-    LLM_BASE_URL, ASR_MODEL, LLM_MODEL, ASR_LANGUAGE or "auto", BARGE_IN_THRESHOLD_RMS, BARGE_IN_MIN_MS,
+    "Speech module: LLM_BASE_URL=%s ASR_MODEL=%s LLM_MODEL=%s ASR_LANGUAGE=%s dual_llm=%s barge_in_rms=%.0f barge_in_min_ms=%.0f",
+    LLM_BASE_URL, ASR_MODEL, LLM_MODEL, ASR_LANGUAGE or "auto", DUAL_LLM_ENABLED, BARGE_IN_THRESHOLD_RMS, BARGE_IN_MIN_MS,
 )
 
 
@@ -216,12 +231,7 @@ async def _stream_llm(state: SpeechState) -> None:
         if tts_enabled:
             emitter_task = asyncio.create_task(_emit_in_order())
 
-        async for token in dual_stream(
-            messages=list(state.messages),
-            model=LLM_MODEL,
-            base_url=LLM_BASE_URL,
-            api_key=LLM_API_KEY,
-        ):
+        async for token in _voice_llm_stream(list(state.messages)):
             state.partial_llm_response += token
             await _send_json({"type": "llm_token", "token": token})
 

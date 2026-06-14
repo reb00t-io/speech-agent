@@ -40,6 +40,8 @@ docker compose up
 | `LLM_BASE_URL` | yes | — | Base URL for LLM and ASR APIs (OpenAI-compatible) |
 | `LLM_API_KEY` | no | `""` | API key for the LLM/ASR backend |
 | `LLM_MODEL` | no | `gpt-oss-120b` | Model for chat completions (image input requires a vision-capable model, e.g. Kimi) |
+| `LLM_MAX_COMPLETION_TOKENS` | no | `1500` | Per-call completion-token budget for the memorizer request engine |
+| `LLM_DEFAULT_REASONING_EFFORT` | no | `medium` | `reasoning_effort` used when a caller doesn't set one |
 | `ASR_MODEL` | no | `whisper-1` | Model for speech recognition (voice + dictation) |
 | `ASR_LANGUAGE` | no | `""` | Optional ASR language hint (empty = auto-detect) |
 | `API_KEY` | no | `""` | Bearer token for client authentication |
@@ -48,6 +50,7 @@ docker compose up
 | `MISTRAL_API_KEY` | no | `""` | Enables TTS for voice conversation when set |
 | `BARGE_IN_THRESHOLD_RMS` | no | `800` | Min mic loudness (RMS) to interrupt the assistant; raise if its TTS echoes back through the mic |
 | `BARGE_IN_MIN_MS` | no | `400` | Min duration of sustained loud audio before a barge-in fires (filters brief echo blips) |
+| `DUAL_LLM_ENABLED` | no | `true` | Use the dual-LLM ("thinking fast and slow") orchestration for voice replies; set `false` for a single plain LLM stream |
 | `SESSIONS_PATH` | no | `data/sessions.json` | Where chat history is persisted |
 | `REQUEST_LOG_PATH` | no | `data/requests.log` | Request/response log file |
 | `DOWNLOADS_DIR` | no | `data/downloads` | Where `publish_document` PDFs are stored and served from `/download/<token>.pdf` |

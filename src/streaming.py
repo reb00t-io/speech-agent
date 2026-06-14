@@ -1,5 +1,4 @@
 import asyncio
-import codecs
 import copy
 import json
 import logging
@@ -12,10 +11,10 @@ import aiohttp
 from quart import Response, jsonify
 
 try:
-    from .dual_llm import dual_stream
+    from . import llm_engine
     from .tool_executor import execute_tool_call
 except ImportError:
-    from dual_llm import dual_stream
+    import llm_engine
     from tool_executor import execute_tool_call
 
 MAX_TOOL_CALL_ROUNDS = 10
@@ -143,70 +142,39 @@ def finalize_tool_calls(state: StreamState) -> list[dict]:
     return [state.tool_calls[index] for index in sorted(state.tool_calls)]
 
 
-async def handle_event(event: str, state: StreamState):
-    for line in event.splitlines():
-        if not line.startswith("data: "):
-            continue
+async def process_chunk(chunk: dict, state: StreamState):
+    """Process one parsed OpenAI streaming chunk; accumulate tool calls and
+    re-emit content (paced) to the client."""
+    choices = chunk.get("choices") or []
+    if not choices:
+        return
 
-        payload = line[6:]
-        if payload == "[DONE]":
-            return
+    choice = choices[0]
+    delta = choice.get("delta") or {}
+    role = delta.get("role")
+    content = delta.get("content") or ""
+    for tool_call_delta in delta.get("tool_calls") or []:
+        if isinstance(tool_call_delta, dict):
+            _merge_tool_call_delta(state, tool_call_delta)
+    if choice.get("finish_reason"):
+        state.finish_reason = choice.get("finish_reason")
 
-        try:
-            chunk = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
+    if role and not content:
+        role_chunk = copy.deepcopy(chunk)
+        role_chunk["choices"][0]["delta"] = {"role": role}
+        yield emit_event(json.dumps(role_chunk, separators=(",", ":")))
+        return
 
-        choices = chunk.get("choices") or []
-        if not choices:
-            continue
+    if not content:
+        return
 
-        choice = choices[0]
-        delta = choice.get("delta") or {}
-        role = delta.get("role")
-        content = delta.get("content") or ""
-        for tool_call_delta in delta.get("tool_calls") or []:
-            if isinstance(tool_call_delta, dict):
-                _merge_tool_call_delta(state, tool_call_delta)
-        if choice.get("finish_reason"):
-            state.finish_reason = choice.get("finish_reason")
-
-        if role and not content:
-            role_chunk = copy.deepcopy(chunk)
-            role_chunk["choices"][0]["delta"] = {"role": role}
-            yield emit_event(json.dumps(role_chunk, separators=(",", ":")))
-            continue
-
-        if not content:
-            continue
-
-        for piece in _split_stream_text(content):
-            content_chunk = copy.deepcopy(chunk)
-            content_chunk["choices"][0]["delta"] = {"content": piece}
-            state.reply_parts.append(piece)
-            yield emit_event(json.dumps(content_chunk, separators=(",", ":")))
-            if state.stream_pace_seconds > 0:
-                await asyncio.sleep(state.stream_pace_seconds)
-
-
-async def flush_events(events_text: str, state: StreamState):
-    state.text_buf += events_text
-
-    while True:
-        boundary = state.text_buf.find("\n\n")
-        separator_len = 2
-
-        if boundary == -1:
-            boundary = state.text_buf.find("\r\n\r\n")
-            separator_len = 4
-
-        if boundary == -1:
-            break
-
-        event = state.text_buf[:boundary]
-        state.text_buf = state.text_buf[boundary + separator_len :]
-        async for outbound in handle_event(event, state):
-            yield outbound
+    for piece in _split_stream_text(content):
+        content_chunk = copy.deepcopy(chunk)
+        content_chunk["choices"][0]["delta"] = {"content": piece}
+        state.reply_parts.append(piece)
+        yield emit_event(json.dumps(content_chunk, separators=(",", ":")))
+        if state.stream_pace_seconds > 0:
+            await asyncio.sleep(state.stream_pace_seconds)
 
 
 def split_frontend_tool_calls(tool_calls: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -265,121 +233,63 @@ async def execute_backend_tool_round(messages: list[dict], tool_calls: list[dict
     yield _tool_status_event(None)
 
 
-async def generate_dual_stream(
-    *,
-    messages: list[dict],
-    save_sessions: Callable[[], None],
-    llm_base_url: str,
-    llm_api_key: str,
-    llm_model: str,
-    stream_pace_seconds: float,
-):
-    """Generate a response using the dual-LLM system (no tool calling)."""
-    try:
-        reply_parts: list[str] = []
-        async for token in dual_stream(
-            messages=messages,
-            model=llm_model,
-            base_url=llm_base_url,
-            api_key=llm_api_key,
-        ):
-            reply_parts.append(token)
-            for piece in _split_stream_text(token):
-                yield emit_event(json.dumps({"choices": [{"delta": {"content": piece}}]}, separators=(",", ":")))
-                if stream_pace_seconds > 0:
-                    await asyncio.sleep(stream_pace_seconds)
-
-        messages.append({"role": "assistant", "content": "".join(reply_parts)})
-        yield emit_event("[DONE]")
-    finally:
-        save_sessions()
-
-
 async def generate_stream(
     *,
     messages: list[dict],
     save_sessions: Callable[[], None],
-    client_factory,
-    llm_base_url: str,
-    llm_api_key: str,
-    llm_body: dict,
     stream_pace_seconds: float,
     tools: list[dict],
     session_id: str,
 ):
+    """Stream a tool-capable chat completion (text chat) via the memorizer
+    request engine, running the tool-call loop as needed."""
     try:
-        async with client_factory(timeout=120) as client:
-            for round_index in range(MAX_TOOL_CALL_ROUNDS):
-                state = StreamState(stream_pace_seconds=stream_pace_seconds)
-                decoder = codecs.getincrementaldecoder("utf-8")()
-                request_body = dict(llm_body)
-                request_body["messages"] = messages
-                request_body["tools"] = tools
+        for round_index in range(MAX_TOOL_CALL_ROUNDS):
+            state = StreamState(stream_pace_seconds=stream_pace_seconds)
 
-                async with client.stream(
-                    "POST",
-                    f"{llm_base_url}/chat/completions",
-                    headers={
-                        "Accept": "text/event-stream",
-                        "Accept-Encoding": "identity",
-                        "Authorization": f"Bearer {llm_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=request_body,
-                ) as resp:
-                    resp.raise_for_status()
-                    async for chunk in resp.aiter_raw():
-                        if not chunk:
-                            continue
-                        async for outbound in flush_events(decoder.decode(chunk), state):
-                            yield outbound
+            async for chunk in llm_engine.stream_chat(messages, tools=tools or None):
+                async for outbound in process_chunk(chunk, state):
+                    yield outbound
 
-                    async for outbound in flush_events(decoder.decode(b"", final=True), state):
-                        yield outbound
+            assistant_message: dict = {"role": "assistant", "content": "".join(state.reply_parts)}
+            tool_calls = finalize_tool_calls(state)
+            if tool_calls:
+                assistant_message["tool_calls"] = tool_calls
+            messages.append(assistant_message)
 
-                    if state.text_buf.strip():
-                        async for outbound in handle_event(state.text_buf, state):
-                            yield outbound
+            if not tool_calls:
+                yield emit_event("[DONE]")
+                return
 
-                assistant_message: dict = {"role": "assistant", "content": "".join(state.reply_parts)}
-                tool_calls = finalize_tool_calls(state)
-                if tool_calls:
-                    assistant_message["tool_calls"] = tool_calls
-                messages.append(assistant_message)
+            frontend_tool_calls, backend_tool_calls = split_frontend_tool_calls(tool_calls)
 
-                if not tool_calls:
-                    yield emit_event("[DONE]")
-                    return
+            if backend_tool_calls:
+                async for outbound in execute_backend_tool_round(messages, backend_tool_calls):
+                    yield outbound
 
-                frontend_tool_calls, backend_tool_calls = split_frontend_tool_calls(tool_calls)
-
-                if backend_tool_calls:
-                    async for outbound in execute_backend_tool_round(messages, backend_tool_calls):
-                        yield outbound
-
-                if frontend_tool_calls:
-                    for tool_call in frontend_tool_calls:
-                        tool_call_id = tool_call.get("id", "")
-                        tool_name = (tool_call.get("function") or {}).get("name", "")
-                        logger.info(
-                            "Forwarding tool request to frontend and ending stream: session_id=%s tool_call_id=%s tool=%s",
-                            session_id,
-                            tool_call_id,
-                            tool_name,
-                        )
-                        yield emit_event(json.dumps({"tool_request": build_frontend_tool_request(session_id, tool_call)}, separators=(",", ":")))
-                    yield emit_event("[DONE]")
-                    return
-
-                if round_index == MAX_TOOL_CALL_ROUNDS - 1:
-                    error_text = (
-                        f"Tool-calling stopped after {MAX_TOOL_CALL_ROUNDS} rounds to prevent infinite loops. "
-                        "Please answer with the information already gathered."
+            if frontend_tool_calls:
+                for tool_call in frontend_tool_calls:
+                    tool_call_id = tool_call.get("id", "")
+                    tool_name = (tool_call.get("function") or {}).get("name", "")
+                    logger.info(
+                        "Forwarding tool request to frontend and ending stream: session_id=%s tool_call_id=%s tool=%s",
+                        session_id,
+                        tool_call_id,
+                        tool_name,
                     )
-                    messages.append({"role": "assistant", "content": error_text})
-                    yield emit_event(json.dumps({"choices": [{"delta": {"content": error_text}}]}, separators=(",", ":")))
-                    yield emit_event("[DONE]")
-                    return
+                    yield emit_event(json.dumps({"tool_request": build_frontend_tool_request(session_id, tool_call)}, separators=(",", ":")))
+                yield emit_event("[DONE]")
+                return
+
+            if round_index == MAX_TOOL_CALL_ROUNDS - 1:
+                error_text = (
+                    f"Tool-calling stopped after {MAX_TOOL_CALL_ROUNDS} rounds to prevent infinite loops. "
+                    "Please answer with the information already gathered."
+                )
+                messages.append({"role": "assistant", "content": error_text})
+                yield emit_event(json.dumps({"choices": [{"delta": {"content": error_text}}]}, separators=(",", ":")))
+                yield emit_event("[DONE]")
+                return
     finally:
         save_sessions()
 
@@ -416,10 +326,6 @@ async def post_chat_response(
     save_sessions: Callable[[], None],
     on_session_start: Callable[[str], None] | None = None,
     tools: list[dict] | None = None,
-    client_factory,
-    llm_base_url: str,
-    llm_api_key: str,
-    llm_model: str,
     stream_pace_seconds: float,
 ):
     if _is_unauthorized(api_key, authorization):
@@ -454,14 +360,9 @@ async def post_chat_response(
     if tool_results:
         append_tool_result_messages(messages, tool_results)
 
-    llm_body = {"model": llm_model, "stream": True, "messages": messages}
     generator = generate_stream(
         messages=messages,
         save_sessions=save_sessions,
-        client_factory=client_factory,
-        llm_base_url=llm_base_url,
-        llm_api_key=llm_api_key,
-        llm_body=llm_body,
         stream_pace_seconds=stream_pace_seconds,
         tools=tools or [],
         session_id=session_id,

@@ -14,7 +14,6 @@ logging.basicConfig(
     force=True,
 )
 
-import httpx
 from quart import Quart, g, jsonify, redirect, render_template, request, session, url_for
 
 try:
@@ -430,10 +429,6 @@ async def chat_responses():
         save_sessions=_save_sessions,
         on_session_start=_on_session_start,
         tools=get_tools(),
-        client_factory=httpx.AsyncClient,
-        llm_base_url=LLM_BASE_URL,
-        llm_api_key=LLM_API_KEY,
-        llm_model=LLM_MODEL,
         stream_pace_seconds=STREAM_PACE_SECONDS,
     )
 

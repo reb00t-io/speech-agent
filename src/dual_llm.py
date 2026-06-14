@@ -9,23 +9,25 @@ The user only sees System 1 output. For trivial queries (score ≤ 2),
 System 1's direct answer is used. For complex queries, System 2 thinks
 deeply and System 1 progressively presents that thinking to the user.
 
-Reasoning depth is requested via the OpenAI ``reasoning_effort`` parameter,
-except for Kimi models which instead toggle ``chat_template_kwargs.thinking``
-(see ``_apply_reasoning_effort``).
+All LLM calls go through the shared memorizer request engine (``llm_engine``),
+so the Router, System 1, and System 2 reuse one request context (maximising the
+inference server's prefix cache).
 """
 
 from __future__ import annotations
 
 import asyncio
-import codecs
+import contextlib
 import json
 import logging
 import re
 import time
 from collections.abc import AsyncGenerator
-from typing import Any
 
-import httpx
+try:
+    from .llm_engine import stream_content_tokens
+except ImportError:
+    from llm_engine import stream_content_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -64,135 +66,34 @@ S1_PRESENT_FINAL = (
 # ─── Low-level LLM helpers ──────────────────────────────────────────────────
 
 
-def _is_kimi_model(model: str) -> bool:
-    """Whether *model* is a Kimi model (which toggles reasoning differently)."""
-    return "kimi" in model.lower()
-
-
-def _apply_reasoning_effort(body: dict[str, Any], model: str, reasoning_effort: str | None) -> None:
-    """Set the request field(s) controlling reasoning depth for *model*.
-
-    Most OpenAI-compatible models accept ``reasoning_effort``. Kimi rejects it
-    and instead toggles thinking via ``chat_template_kwargs={"thinking": bool}``.
-    We map a "low" effort to thinking disabled (the fast path) and anything else
-    to thinking enabled, so the fast/deep contrast the dual-LLM design relies on
-    is preserved on Kimi regardless of its server-side default.
-    """
-    if _is_kimi_model(model):
-        body.setdefault("chat_template_kwargs", {})["thinking"] = reasoning_effort != "low"
-        return
-    if reasoning_effort:
-        body["reasoning_effort"] = reasoning_effort
-
-
-async def _iter_sse_tokens(
-    resp: httpx.Response,
-    usage_out: dict[str, int] | None,
-) -> AsyncGenerator[str, None]:
-    """Parse SSE chunks from an httpx streaming response, yielding content tokens."""
-    decoder = codecs.getincrementaldecoder("utf-8")()
-    text_buf = ""
-    async for raw_chunk in resp.aiter_raw():
-        if not raw_chunk:
-            continue
-        text_buf += decoder.decode(raw_chunk)
-        while "\n\n" in text_buf:
-            event, text_buf = text_buf.split("\n\n", 1)
-            for line in event.splitlines():
-                if not line.startswith("data: "):
-                    continue
-                payload = line[6:]
-                if payload == "[DONE]":
-                    return
-                try:
-                    chunk = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                if usage_out is not None:
-                    usage = chunk.get("usage")
-                    if usage and isinstance(usage, dict):
-                        usage_out.update(usage)
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
-                content = delta.get("content") or ""
-                if content:
-                    yield content
-
-
 async def _llm_stream_tokens(
     *,
-    client: httpx.AsyncClient,
-    base_url: str,
-    api_key: str,
-    model: str,
     messages: list[dict],
     reasoning_effort: str | None = None,
-    response_format: dict | None = None,
     usage_out: dict[str, int] | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Stream tokens from the LLM. Yields content strings.
+    """Stream assistant content tokens for *messages* via the memorizer engine.
 
-    If *usage_out* is provided (a mutable dict), it will be populated with
-    ``prompt_tokens``, ``completion_tokens``, and ``total_tokens`` from the
-    final streaming chunk.
+    If *usage_out* is provided (a mutable dict), it is populated with
+    ``prompt_tokens``, ``completion_tokens``, and ``total_tokens`` from the final
+    streaming chunk.
     """
-    body: dict[str, Any] = {"model": model, "stream": True, "messages": messages}
-    _apply_reasoning_effort(body, model, reasoning_effort)
-    if response_format:
-        body["response_format"] = response_format
-    if usage_out is not None:
-        body["stream_options"] = {"include_usage": True}
-
-    headers = {
-        "Accept": "text/event-stream",
-        "Accept-Encoding": "identity",
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    url = f"{base_url}/chat/completions"
-
-    async with client.stream("POST", url, headers=headers, json=body) as resp:
-        if resp.status_code >= 400 and "stream_options" in body:
-            # API may not support stream_options — retry without it
-            logger.warning("LLM returned HTTP %d with stream_options, retrying without", resp.status_code)
-        else:
-            resp.raise_for_status()
-            async for token in _iter_sse_tokens(resp, usage_out):
-                yield token
-            return
-
-    # Retry without stream_options
-    body.pop("stream_options", None)
-    async with client.stream("POST", url, headers=headers, json=body) as resp:
-        resp.raise_for_status()
-        async for token in _iter_sse_tokens(resp, usage_out):
-            yield token
+    async for token in stream_content_tokens(
+        messages, reasoning_effort=reasoning_effort, usage_out=usage_out
+    ):
+        yield token
 
 
 async def _llm_collect(
     *,
-    client: httpx.AsyncClient,
-    base_url: str,
-    api_key: str,
-    model: str,
     messages: list[dict],
     reasoning_effort: str | None = None,
-    response_format: dict | None = None,
     usage_out: dict[str, int] | None = None,
 ) -> str:
     """Collect the full response from the LLM as a string."""
     parts = []
     async for token in _llm_stream_tokens(
-        client=client,
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        messages=messages,
-        reasoning_effort=reasoning_effort,
-        response_format=response_format,
-        usage_out=usage_out,
+        messages=messages, reasoning_effort=reasoning_effort, usage_out=usage_out
     ):
         parts.append(token)
     return "".join(parts)
@@ -218,29 +119,14 @@ def _extract_first_sentence(text: str) -> str:
 # ─── Router ──────────────────────────────────────────────────────────────────
 
 
-async def _route(
-    *,
-    client: httpx.AsyncClient,
-    base_url: str,
-    api_key: str,
-    model: str,
-    messages: list[dict],
-) -> int:
+async def _route(*, messages: list[dict]) -> int:
     """Rate query complexity 1-10. Returns the score."""
     router_messages = list(messages) + [
         {"role": "user", "content": ROUTER_INSTRUCTION},
     ]
     t0 = time.monotonic()
     try:
-        result = await _llm_collect(
-            client=client,
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            messages=router_messages,
-            reasoning_effort="low",
-            response_format={"type": "json_object"},
-        )
+        result = await _llm_collect(messages=router_messages, reasoning_effort="low")
         elapsed_ms = (time.monotonic() - t0) * 1000
         result = result.strip()
         # Try JSON first, then fall back to extracting a number
@@ -275,23 +161,11 @@ class _System2:
         self._event = asyncio.Event()
         self._sentence_count = 0
 
-    async def run(
-        self,
-        *,
-        client: httpx.AsyncClient,
-        base_url: str,
-        api_key: str,
-        model: str,
-        messages: list[dict],
-    ) -> None:
+    async def run(self, *, messages: list[dict]) -> None:
         t0 = time.monotonic()
         logger.info("S2: started")
         try:
             async for token in _llm_stream_tokens(
-                client=client,
-                base_url=base_url,
-                api_key=api_key,
-                model=model,
                 messages=messages,
                 usage_out=self.usage,
             ):
@@ -325,30 +199,40 @@ class _System2:
         return True
 
 
+# ─── Single-LLM path (dual-LLM disabled) ─────────────────────────────────────
+
+
+async def single_stream(*, messages: list[dict]) -> AsyncGenerator[str, None]:
+    """Plain single-LLM streaming — used when dual-LLM is disabled.
+
+    Mirrors ``dual_stream``'s signature so callers can swap purely on a toggle.
+    One LLM call, default reasoning, no router/System-1/System-2 orchestration.
+    Streams via the shared memorizer engine (``llm_engine``).
+    """
+    async for token in _llm_stream_tokens(messages=messages):
+        yield token
+
+
 # ─── Main orchestrator ───────────────────────────────────────────────────────
 
 
-async def dual_stream(
-    *,
-    messages: list[dict],
-    model: str,
-    base_url: str,
-    api_key: str,
-) -> AsyncGenerator[str, None]:
+async def dual_stream(*, messages: list[dict]) -> AsyncGenerator[str, None]:
     """Orchestrate Router + System 1 + System 2 and yield user-facing tokens.
 
     Args:
         messages: Full message history including system prompt and current
                   user message (already appended by the caller).
-        model: LLM model name.
-        base_url: LLM API base URL.
-        api_key: LLM API key.
 
     Yields:
         Content tokens to show to the user.
     """
-    async with httpx.AsyncClient(timeout=120) as client:
-        kwargs = dict(client=client, base_url=base_url, api_key=api_key, model=model)
+    # MEMORIZER INTEGRATION POINT: every subsystem below streams through the one
+    # shared memorizer engine (llm_engine.get_model()), so the Router, System 1,
+    # and System 2 reuse a single request context — the inference server's prefix
+    # cache is hit across all of their calls. See docs/memorizer_integration.md.
+    # The AsyncExitStack is the per-turn scope (no per-turn client to manage now).
+    async with contextlib.AsyncExitStack():
+        kwargs: dict = {}
 
         # Start all three subsystems concurrently
         t_start = time.monotonic()
@@ -377,8 +261,8 @@ async def dual_stream(
         s2 = _System2()
         s2_task = asyncio.create_task(s2.run(messages=messages, **kwargs))
 
-        # Ensure all background tasks are cancelled before the httpx client
-        # closes (e.g. when the caller cancels this generator).
+        # Ensure all background tasks are cancelled before the turn scope closes
+        # (e.g. when the caller cancels this generator).
         try:
             # Wait for router
             try:
@@ -539,7 +423,7 @@ async def dual_stream(
             )
 
         finally:
-            # Cancel all background tasks before the httpx client closes
+            # Cancel all background tasks before the turn scope closes
             for task in (router_task, s1_task, s2_task):
                 if not task.done():
                     task.cancel()
