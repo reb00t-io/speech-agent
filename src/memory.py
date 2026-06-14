@@ -42,7 +42,10 @@ def _get():
     if _model is None:
         from memorizer import Model
 
-        from . import llm_engine
+        try:
+            from . import llm_engine
+        except ImportError:  # flat layout in the container (run as `python main.py`)
+            import llm_engine
         _model = Model.create(
             model_id=llm_engine.LLM_MODEL,
             base_url=llm_engine.LLM_BASE_URL,
