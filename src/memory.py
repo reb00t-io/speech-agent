@@ -29,8 +29,11 @@ logger = logging.getLogger(__name__)
 ENABLED = (os.environ.get("MEMORY_ENABLED") or "true").strip().lower() not in {"0", "false", "no", "off"}
 DATA_DIR = os.environ.get("MEMORIZER_DATA_DIR") or "data/memory"
 MAX_RECALL_CHARS = int(os.environ.get("MEMORY_MAX_RECALL_CHARS") or 6000)
-# durable sections to recall (skip working/short_term — that's the live convo)
-_RECALL_SECTIONS = ("long_term_factual", "model_goal", "long_term_episodic", "workspace")
+# All memory sections (the shared Context spans every session, so its
+# short_term/working hold turns from OTHER sessions too). We recall these and
+# dedupe against the live request so the current session isn't duplicated.
+_RECALL_SECTIONS = ("long_term_factual", "model_goal", "long_term_episodic",
+                    "workspace", "short_term", "working")
 
 _model = None
 _lock = threading.RLock()
@@ -65,43 +68,58 @@ def _as_text(content) -> str:
     return (content or "").strip() if isinstance(content, str) else ""
 
 
-def recall_text() -> str:
-    """The distilled durable memory as a single string (capped), or ''."""
+def recall_messages() -> list[dict]:
+    """All remembered messages across sections (oldest→newest), or []."""
     if not ENABLED:
-        return ""
+        return []
     try:
         with _lock:
             ctx = _get().context
-            chunks = []
+            out: list[dict] = []
             for attr in _RECALL_SECTIONS:
                 sec = getattr(ctx, attr, None)
-                if sec is None:
-                    continue
-                for m in sec.to_messages():
-                    c = _as_text(m.get("content"))
-                    if c:
-                        chunks.append(c)
-        blob = "\n\n".join(chunks).strip()
-        return blob[:MAX_RECALL_CHARS]
+                if sec is not None:
+                    out.extend(sec.to_messages())
+        return out
     except Exception as e:
         logger.warning("memory recall failed: %s", e)
-        return ""
+        return []
 
 
 def inject(messages: list[dict]) -> list[dict]:
-    """Return messages with durable memory inserted after the leading system
-    prompt. Does not mutate the caller's list (so it isn't persisted into the
-    session and re-injected next turn)."""
-    blob = recall_text()
-    if not blob:
+    """Return messages with recalled memory inserted after the leading system
+    prompt — deduped against the live request (so the current session isn't
+    repeated) and capped to the most recent MAX_RECALL_CHARS. Does not mutate
+    the caller's list."""
+    recalled = recall_messages()
+    if not recalled:
         return messages
-    mem = {"role": "system", "content":
-           "Long-term memory about the user and earlier conversations — use it to "
-           "personalise your answer; do not repeat it verbatim:\n\n" + blob}
+    seen = {_as_text(m.get("content")) for m in messages}
+    picked: list[dict] = []
+    for m in recalled:
+        c = _as_text(m.get("content"))
+        if c and c not in seen:
+            seen.add(c)
+            picked.append(m)
+    if not picked:
+        return messages
+    # keep the most recent within the char budget
+    kept: list[dict] = []
+    total = 0
+    for m in reversed(picked):
+        c = _as_text(m.get("content"))
+        if total + len(c) > MAX_RECALL_CHARS:
+            break
+        kept.append(m)
+        total += len(c)
+    kept.reverse()
+    header = {"role": "system", "content":
+              "Recalled memory from earlier conversations with this user — use it to "
+              "personalise your answer; do not repeat it verbatim:"}
     i = 0
     while i < len(messages) and messages[i].get("role") == "system":
         i += 1
-    return messages[:i] + [mem] + messages[i:]
+    return messages[:i] + [header] + kept + messages[i:]
 
 
 def observe(user_text, assistant_text) -> None:
