@@ -32,6 +32,10 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-oss-120b")
 ASR_MODEL = os.environ.get("ASR_MODEL", "")
 ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "")
 AUDIO_RECORDING_DIR = os.environ.get("AUDIO_RECORDING_DIR", "data/audio_recordings")
+# Client auth for the speech WebSocket. Browsers can't set headers on a
+# WebSocket, so the key is passed as the ``key`` query param. When API_KEY is
+# unset (standalone dev), the socket is open — same convention as the /v1 routes.
+API_KEY = os.environ.get("API_KEY", "")
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
 TTS_MODEL = os.environ.get("TTS_MODEL", "voxtral-mini-tts-2603")
 TTS_VOICE = os.environ.get("TTS_VOICE", "en_paul_neutral")
@@ -358,6 +362,11 @@ async def handle_speech_ws(
 ) -> None:
     """Main WebSocket handler for speech mode. Call from a @app.websocket route."""
     args = websocket.args
+    if API_KEY and args.get("key") != API_KEY:
+        logger.warning("Speech WS rejected: missing/invalid key")
+        await _send_json({"type": "error", "message": "unauthorized"})
+        await websocket.close(1008)  # policy violation
+        return
     session_id = args.get("session_id") or secrets.token_urlsafe(16)
 
     if session_id not in sessions:

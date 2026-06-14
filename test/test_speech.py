@@ -221,3 +221,34 @@ async def test_websocket_creates_session_in_store(ws_client):
         await ws.send(json.dumps({"type": "stop"}))
 
     assert sid in sessions
+
+
+# ─── WebSocket auth (key gate) ───────────────────────────────────────────────
+
+async def test_ws_open_when_no_api_key(ws_client, monkeypatch):
+    """Standalone (no API_KEY): the socket stays open — connect succeeds."""
+    monkeypatch.setattr("src.speech.API_KEY", "")
+    async with ws_client.websocket("/ws/speech?mode=user") as ws:
+        msg = json.loads(await ws.receive())
+        assert msg["type"] == "session_start"
+
+
+async def test_ws_rejects_missing_key_when_configured(ws_client, monkeypatch):
+    monkeypatch.setattr("src.speech.API_KEY", "secret")
+    async with ws_client.websocket("/ws/speech?mode=user") as ws:
+        msg = json.loads(await ws.receive())
+        assert msg["type"] == "error"  # unauthorized, no session_start
+
+
+async def test_ws_rejects_wrong_key(ws_client, monkeypatch):
+    monkeypatch.setattr("src.speech.API_KEY", "secret")
+    async with ws_client.websocket("/ws/speech?mode=user&key=nope") as ws:
+        msg = json.loads(await ws.receive())
+        assert msg["type"] == "error"
+
+
+async def test_ws_accepts_correct_key(ws_client, monkeypatch):
+    monkeypatch.setattr("src.speech.API_KEY", "secret")
+    async with ws_client.websocket("/ws/speech?mode=user&key=secret") as ws:
+        msg = json.loads(await ws.receive())
+        assert msg["type"] == "session_start"

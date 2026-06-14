@@ -43,6 +43,9 @@ export class SpeechSession {
         const params = new URLSearchParams({ mode: this.mode });
         if (this.sessionId) params.set('session_id', this.sessionId);
         if (this.dictation) params.set('dictation', '1');
+        // WebSockets can't carry an Authorization header — pass the key (if any)
+        // as a query param; the server enforces it when API_KEY is configured.
+        if (window.__CHAT_API_KEY__) params.set('key', window.__CHAT_API_KEY__);
         const root = window.APP_ROOT || '';
         const url = `${proto}//${location.host}${root}/ws/speech?${params}`;
 
