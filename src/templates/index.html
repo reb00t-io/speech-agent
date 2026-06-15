@@ -4,10 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Assistant</title>
+  <!-- Apply a saved theme before paint to avoid a flash; no choice ⇒ follow the
+       browser's color scheme. -->
+  <script>(function(){try{var t=localStorage.getItem('theme');if(t==='dark'||t==='light')document.documentElement.dataset.theme=t;}catch(e){}})();</script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    :root {
+    :root {                 /* light (default) */
       --bg: #ffffff;
       --fg: #0d0d0d;
       --muted: #8e8ea0;
@@ -18,6 +21,38 @@
       --accent: #0d0d0d;
       --user-bubble: #f4f4f4;
       --danger: #ef4444;
+      --hover: #f4f4f4;
+      --scrollbar: #e0e0e0;
+      --code-bg: #f1f1f1;
+      --link: #0b57d0;
+      --danger-bg: #fde8e8;
+      --danger-bg-hover: #fbd5d5;
+      --viz-idle: #d4d4d8;
+      --chip-fg: #4b4b4b;
+      --chip-hover: #f7f7f7;
+      --chip-active-bg: #0d0d0d;
+      --chip-active-fg: #ffffff;
+    }
+
+    /* Dark palette (matches the reb00t home hub). Used when the browser scheme
+       is dark (unless the user forced light) or when the user toggles dark. */
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+      --bg: #0f1117; --fg: #e0e0e8; --muted: #888899; --line: #2a2d3a;
+      --bar-bg: #1a1d27; --bar-shadow: 0 2px 18px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.05);
+      --chip-line: #2a2d3a; --accent: #3b82f6; --user-bubble: #20242f; --danger: #ef4444;
+      --hover: rgba(255,255,255,0.06); --scrollbar: #2a2d3a; --code-bg: #20242f;
+      --link: #6ea8fe; --danger-bg: rgba(239,68,68,0.16); --danger-bg-hover: rgba(239,68,68,0.28);
+      --viz-idle: #3a3f4d; --chip-fg: #c8c8d4; --chip-hover: rgba(255,255,255,0.06);
+      --chip-active-bg: #3b82f6; --chip-active-fg: #ffffff;
+    } }
+    :root[data-theme="dark"] {
+      --bg: #0f1117; --fg: #e0e0e8; --muted: #888899; --line: #2a2d3a;
+      --bar-bg: #1a1d27; --bar-shadow: 0 2px 18px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.05);
+      --chip-line: #2a2d3a; --accent: #3b82f6; --user-bubble: #20242f; --danger: #ef4444;
+      --hover: rgba(255,255,255,0.06); --scrollbar: #2a2d3a; --code-bg: #20242f;
+      --link: #6ea8fe; --danger-bg: rgba(239,68,68,0.16); --danger-bg-hover: rgba(239,68,68,0.28);
+      --viz-idle: #3a3f4d; --chip-fg: #c8c8d4; --chip-hover: rgba(255,255,255,0.06);
+      --chip-active-bg: #3b82f6; --chip-active-fg: #ffffff;
     }
 
     html, body { height: 100%; }
@@ -34,14 +69,23 @@
       display: flex; align-items: center; justify-content: space-between;
       padding: 0 1rem; z-index: 20; background: linear-gradient(var(--bg), rgba(255,255,255,0));
     }
+    .topbar .left { display: flex; align-items: center; gap: 0.35rem; }
     .topbar .brand { font-weight: 600; font-size: 0.95rem; letter-spacing: -0.01em; }
     .topbar .actions { display: flex; gap: 0.25rem; }
+    /* theme toggle shows the icon of the theme you'd switch TO */
+    #theme-toggle .ico-sun { display: none; }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) #theme-toggle .ico-sun { display: inline; }
+      :root:not([data-theme="light"]) #theme-toggle .ico-moon { display: none; }
+    }
+    :root[data-theme="dark"] #theme-toggle .ico-sun { display: inline; }
+    :root[data-theme="dark"] #theme-toggle .ico-moon { display: none; }
     .topbar button {
       border: none; background: none; cursor: pointer; color: var(--muted);
       font-size: 0.82rem; padding: 0.45rem 0.7rem; border-radius: 8px;
       display: inline-flex; align-items: center; gap: 0.35rem;
     }
-    .topbar button:hover { background: #f4f4f4; color: var(--fg); }
+    .topbar button:hover { background: var(--hover); color: var(--fg); }
 
     /* ─── Layout ──────────────────────────────────────────────────────────── */
     /* #main spans the full width so the conversation scrollbar sits at the
@@ -56,7 +100,7 @@
       scroll-behavior: smooth;
     }
     #conversation::-webkit-scrollbar { width: 10px; }
-    #conversation::-webkit-scrollbar-thumb { background: #e0e0e0; border-radius: 5px; }
+    #conversation::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 5px; }
 
     #messages {
       max-width: 50rem; margin: 0 auto; padding: 1rem 1rem 1.5rem;
@@ -91,8 +135,9 @@
     .bubble.is-speaking { position: relative; }
     .bubble.is-speaking::after {
       content: ''; display: inline-block; width: 14px; height: 14px; margin-left: 6px;
-      vertical-align: -2px;
-      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230d0d0d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='11 5 6 9 2 9 2 15 6 15 11 19 11 5'/%3E%3Cpath d='M15.54 8.46a5 5 0 0 1 0 7.07'/%3E%3C/svg%3E") no-repeat center/contain;
+      vertical-align: -2px; background: var(--fg);  /* themed via mask */
+      -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='11 5 6 9 2 9 2 15 6 15 11 19 11 5'/%3E%3Cpath d='M15.54 8.46a5 5 0 0 1 0 7.07'/%3E%3C/svg%3E") no-repeat center/contain;
+      mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='11 5 6 9 2 9 2 15 6 15 11 19 11 5'/%3E%3Cpath d='M15.54 8.46a5 5 0 0 1 0 7.07'/%3E%3C/svg%3E") no-repeat center/contain;
       animation: pulse 1.1s ease-in-out infinite;
     }
     @keyframes pulse { 0%,100%{opacity:.5} 50%{opacity:1} }
@@ -110,10 +155,10 @@
     .bubble h1 { font-size: 1.3em; } .bubble h2 { font-size: 1.15em; } .bubble h3 { font-size: 1.02em; }
     .bubble ul,.bubble ol { padding-left: 1.4em; margin: 0.4em 0; }
     .bubble li { margin: 0.2em 0; }
-    .bubble code { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.85em; background: #f1f1f1; border-radius: 5px; padding: 0.1em 0.35em; }
+    .bubble code { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.85em; background: var(--code-bg); border-radius: 5px; padding: 0.1em 0.35em; }
     .bubble pre { background: #0d0d0d; color: #f4f4f4; border-radius: 12px; padding: 0.85rem 1rem; overflow-x: auto; margin: 0.6em 0; }
     .bubble pre code { background: none; padding: 0; color: inherit; }
-    .bubble a { color: #0b57d0; text-decoration: underline; text-underline-offset: 2px; }
+    .bubble a { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
     .bubble blockquote { border-left: 3px solid var(--line); padding-left: 0.8em; color: var(--muted); margin: 0.4em 0; }
     .bubble table { border-collapse: collapse; margin: 0.5em 0; }
     .bubble th, .bubble td { border: 1px solid var(--line); padding: 0.3em 0.6em; text-align: left; }
@@ -150,18 +195,18 @@
       background: none; color: var(--fg); display: flex; align-items: center; justify-content: center;
       transition: background 0.15s;
     }
-    .icon-btn:hover { background: #f0f0f0; }
+    .icon-btn:hover { background: var(--hover); }
     .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; background: none; }
 
     #send-btn { background: var(--accent); color: #fff; }
     #send-btn:hover { opacity: 0.85; background: var(--accent); }
 
-    #mic-btn.recording { background: #fde8e8; color: var(--danger); animation: micpulse 1.4s ease-in-out infinite; }
+    #mic-btn.recording { background: var(--danger-bg); color: var(--danger); animation: micpulse 1.4s ease-in-out infinite; }
     @keyframes micpulse { 0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.3)} 50%{box-shadow:0 0 0 5px rgba(239,68,68,0)} }
 
     /* Dictation stop button doubles as a loudness indicator (size scales with volume) */
-    .stop-btn { background: #fde8e8; color: var(--danger); transition: transform 0.09s ease-out; transform-origin: center; }
-    .stop-btn:hover { background: #fbd5d5; }
+    .stop-btn { background: var(--danger-bg); color: var(--danger); transition: transform 0.09s ease-out; transform-origin: center; }
+    .stop-btn:hover { background: var(--danger-bg-hover); }
 
     .voice-btn {
       flex-shrink: 0; width: 38px; height: 38px; border-radius: 50%; border: none; cursor: pointer;
@@ -178,7 +223,7 @@
     /* Audio visualizer (during voice conversation) — spans the full input width */
     .viz { display: none; align-items: center; justify-content: space-between; gap: 2px; height: 28px; flex: 1 1 auto; min-width: 0; padding: 0 1.5rem; }
     .viz.active { display: flex; }
-    .viz-bar { flex: 1 1 auto; max-width: 8px; min-height: 3px; border-radius: 3px; background: #d4d4d8; align-self: center; transition: height 0.06s ease-out; }
+    .viz-bar { flex: 1 1 auto; max-width: 8px; min-height: 3px; border-radius: 3px; background: var(--viz-idle); align-self: center; transition: height 0.06s ease-out; }
     .viz-bar.signal { background: var(--accent); }
 
     /* Active tool-call status (one line, at the bottom of the current response) */
@@ -190,11 +235,11 @@
     .chips { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; padding: 0.7rem 0 0; }
     .chip {
       display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;
-      border: 1px solid var(--chip-line); background: var(--bg); color: #4b4b4b;
+      border: 1px solid var(--chip-line); background: var(--bg); color: var(--chip-fg);
       border-radius: 999px; padding: 0.45rem 0.85rem; font-size: 0.82rem; transition: background 0.15s, border-color 0.15s, color 0.15s;
     }
-    .chip:hover { background: #f7f7f7; }
-    .chip.active { background: #0d0d0d; color: #fff; border-color: #0d0d0d; }
+    .chip:hover { background: var(--chip-hover); }
+    .chip.active { background: var(--chip-active-bg); color: var(--chip-active-fg); border-color: var(--chip-active-bg); }
     .chip svg { width: 15px; height: 15px; }
 
     .hint { text-align: center; font-size: 0.72rem; color: var(--muted); padding-top: 0.6rem; }
@@ -219,7 +264,13 @@
 <body class="empty">
 
   <div class="topbar">
-    <div class="brand">Assistant</div>
+    <div class="left">
+      <button id="theme-toggle" title="Toggle light / dark" aria-label="Toggle theme">
+        <svg class="ico-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg class="ico-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      </button>
+      <div class="brand">Assistant</div>
+    </div>
     <div class="actions">
       <button id="new-chat-btn" title="New chat">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -284,5 +335,17 @@
 
   <script>window.APP_ROOT = "{{ app_root }}";</script>
   <script type="module" src="{{ app_root }}/static/chat/chat.js"></script>
+  <script>
+    // Theme toggle: flip the *effective* theme (explicit choice, else the
+    // browser scheme) and remember it. Clearing localStorage returns to "follow
+    // the browser".
+    document.getElementById('theme-toggle')?.addEventListener('click', function () {
+      const cur = document.documentElement.dataset.theme
+        || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      const next = cur === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem('theme', next); } catch (e) {}
+    });
+  </script>
 </body>
 </html>
