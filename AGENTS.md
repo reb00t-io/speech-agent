@@ -108,6 +108,7 @@ When unsure:
 
 ## 8. Common Pitfalls & Couplings
 Things that are easy to break:
+- **Per-user sessions:** each conversation is owned by a user. Identity arrives as `X-User-Id` / `X-User-Name` headers on `/v1/*` and as `user` / `user_name` query params on `/ws/speech` (WebSockets can't send headers). `main.py` keeps `last_session_ids` (user→latest session) + `session_users` (session→owner); `streaming.py`/`speech.py` enforce ownership (404 on cross-user read/post) and stamp the speaker's name into the session's system prompt via `system_prompt_with_user()`. Absent headers ⇒ the `"default"` user (backward compatible). This is **cooperative** identification within an already-authenticated deployment, not a security boundary.
 - If you touch `src/speech.py` WebSocket protocol, you must also update `src/static/chat/speech.js` (they share the message schema)
 - If you add new env vars, update: `main.py`, `docker-compose.yml`, `.envrc`, and the README env var table
 - Test files that import `src.main` must include `os.environ.pop("API_KEY", None)` before the import to avoid auth interference from shell env

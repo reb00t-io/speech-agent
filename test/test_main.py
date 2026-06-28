@@ -14,7 +14,7 @@ os.environ.setdefault("LLM_API_KEY", "test-llm-key")
 os.environ.pop("API_KEY", None)  # auth disabled by default
 
 import src.main as main_module  # noqa: E402
-from src.main import _load_system_prompt, app, last_session_ids, session_modes, sessions  # noqa: E402
+from src.main import _load_system_prompt, app, last_session_ids, session_modes, session_users, sessions  # noqa: E402
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -103,10 +103,12 @@ def reset_sessions():
     sessions.clear()
     session_modes.clear()
     last_session_ids.clear()
+    session_users.clear()
     yield
     sessions.clear()
     session_modes.clear()
     last_session_ids.clear()
+    session_users.clear()
 
 
 # ─── Auth ────────────────────────────────────────────────────────────────────
@@ -670,3 +672,65 @@ async def test_health_is_open_and_ok(client):
     assert resp.status_code == 200
     data = await resp.get_json()
     assert data["status"] == "ok" and data["service"] == "speech-agent"
+
+
+# ─── Per-user separation (household members) ──────────────────────────────────
+
+async def _post_as(client, user_id, name, prompt):
+    with mock_llm(_sse("ok")), patch("src.main._load_system_prompt", return_value="sys"):
+        resp = await client.post(
+            "/v1/responses",
+            json={"prompt": prompt},
+            headers={"X-User-Id": user_id, "X-User-Name": name},
+        )
+        await resp.get_data()
+    return resp.headers.get("X-Session-Id")
+
+
+async def test_latest_session_is_per_user(client):
+    alice_sid = await _post_as(client, "alice", "Alice", "hi from alice")
+    bob_sid = await _post_as(client, "bob", "Bob", "hi from bob")
+    assert alice_sid != bob_sid
+
+    alice_latest = await (await client.get(
+        "/v1/sessions/latest", headers={"X-User-Id": "alice"})).get_json()
+    bob_latest = await (await client.get(
+        "/v1/sessions/latest", headers={"X-User-Id": "bob"})).get_json()
+    assert alice_latest["session_id"] == alice_sid
+    assert bob_latest["session_id"] == bob_sid
+    assert alice_latest["messages"][0]["content"] == "hi from alice"
+
+    # A member with no history (and the anonymous default) sees nothing.
+    none_latest = await (await client.get(
+        "/v1/sessions/latest", headers={"X-User-Id": "carol"})).get_json()
+    assert none_latest == {"session_id": None, "messages": []}
+
+
+async def test_cannot_read_another_members_session(client):
+    alice_sid = await _post_as(client, "alice", "Alice", "private to alice")
+
+    # Owner can read it…
+    owner = await client.get(f"/v1/responses/{alice_sid}", headers={"X-User-Id": "alice"})
+    assert owner.status_code == 200
+    # …another member gets 404 (existence not leaked).
+    other = await client.get(f"/v1/responses/{alice_sid}", headers={"X-User-Id": "bob"})
+    assert other.status_code == 404
+
+
+async def test_cannot_post_into_another_members_session(client):
+    alice_sid = await _post_as(client, "alice", "Alice", "first")
+    with mock_llm(_sse("ok")), patch("src.main._load_system_prompt", return_value="sys"):
+        resp = await client.post(
+            "/v1/responses",
+            json={"prompt": "intrude", "session_id": alice_sid},
+            headers={"X-User-Id": "bob", "X-User-Name": "Bob"},
+        )
+    assert resp.status_code == 404
+
+
+async def test_user_name_added_to_system_prompt(client):
+    sid = await _post_as(client, "alice", "Alice", "remember I like tea")
+    system_msg = sessions[sid][0]
+    assert system_msg["role"] == "system"
+    assert "Alice" in system_msg["content"]
+    assert session_users[sid] == "alice"

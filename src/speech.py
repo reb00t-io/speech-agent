@@ -17,6 +17,7 @@ try:
     from .audio_chunking import AudioChunker, BYTES_PER_SAMPLE, SAMPLE_RATE, is_silent, rms_int16, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from .audio_recording import AudioRecorder
     from .dual_llm import dual_stream, single_stream
+    from .streaming import _owns_session, system_prompt_with_user
     from .tts import split_sentences, synthesize as tts_synthesize, wav_to_base64
 except ImportError:
     import memory
@@ -24,6 +25,7 @@ except ImportError:
     from audio_chunking import AudioChunker, BYTES_PER_SAMPLE, SAMPLE_RATE, is_silent, rms_int16, SILENCE_THRESHOLD_RMS, SILENCE_WINDOW_BYTES
     from audio_recording import AudioRecorder
     from dual_llm import dual_stream, single_stream
+    from streaming import _owns_session, system_prompt_with_user
     from tts import split_sentences, synthesize as tts_synthesize, wav_to_base64
 
 logger = logging.getLogger(__name__)
@@ -373,6 +375,7 @@ async def handle_speech_ws(
     load_system_prompt,
     save_sessions,
     on_session_start=None,
+    session_users: dict[str, str] | None = None,
 ) -> None:
     """Main WebSocket handler for speech mode. Call from a @app.websocket route."""
     args = websocket.args
@@ -381,12 +384,21 @@ async def handle_speech_ws(
         await _send_json({"type": "error", "message": "unauthorized"})
         await websocket.close(1008)  # policy violation
         return
+    # WebSockets can't carry headers from the browser, so identity rides in the
+    # query string (sanitised; cooperative — not a security boundary).
+    user_id = re.sub(r"[^A-Za-z0-9_-]", "", (args.get("user") or "").strip())[:64] or "default"
+    user_name = (args.get("user_name") or "").strip()[:80]
     session_id = args.get("session_id") or secrets.token_urlsafe(16)
+    # Never attach to another member's conversation — start a fresh one instead.
+    if session_id in sessions and not _owns_session(session_users, session_id, user_id):
+        session_id = secrets.token_urlsafe(16)
 
     if session_id not in sessions:
-        sessions[session_id] = [{"role": "system", "content": load_system_prompt()}]
+        sessions[session_id] = [{"role": "system", "content": system_prompt_with_user(load_system_prompt(), user_name)}]
+        if session_users is not None:
+            session_users[session_id] = user_id
         if on_session_start:
-            on_session_start(session_id)
+            on_session_start(session_id, user_id)
 
     messages = sessions[session_id]
     state = SpeechState(session_id=session_id, messages=messages)

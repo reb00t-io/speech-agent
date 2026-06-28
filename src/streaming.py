@@ -299,11 +299,41 @@ async def generate_stream(
         save_sessions()
 
 
-async def get_session_response(*, session_id: str, sessions: dict[str, list[dict]], api_key: str, authorization: str):
+def system_prompt_with_user(base: str, user_name: str) -> str:
+    """Append a note naming the current household member, so the assistant can
+    address them and attribute their preferences. No-op when the name is empty
+    (single-user / anonymous clients)."""
+    if not user_name:
+        return base
+    return base + (
+        f"\n\n# Current user\nYou are speaking with {user_name}, a member of this "
+        "household. Address them by name when natural, and attribute their stated "
+        "preferences and facts to them."
+    )
+
+
+def _owns_session(session_users: dict[str, str] | None, session_id: str, user_id: str) -> bool:
+    """True if this user owns the session (or ownership isn't tracked / unknown)."""
+    if session_users is None:
+        return True
+    return session_users.get(session_id, user_id) == user_id
+
+
+async def get_session_response(
+    *,
+    session_id: str,
+    sessions: dict[str, list[dict]],
+    api_key: str,
+    authorization: str,
+    user_id: str = "default",
+    session_users: dict[str, str] | None = None,
+):
     if _is_unauthorized(api_key, authorization):
         return jsonify({"error": "Unauthorized"}), 401
 
-    if session_id not in sessions:
+    # A session not owned by this user is reported as absent — don't leak that
+    # another member's conversation exists.
+    if session_id not in sessions or not _owns_session(session_users, session_id, user_id):
         return jsonify({"error": "Session not found"}), 404
 
     return jsonify({"messages": visible_messages(sessions[session_id])})
@@ -329,9 +359,12 @@ async def post_chat_response(
     authorization: str,
     load_system_prompt: Callable[[], str],
     save_sessions: Callable[[], None],
-    on_session_start: Callable[[str], None] | None = None,
+    on_session_start: Callable[..., None] | None = None,
     tools: list[dict] | None = None,
     stream_pace_seconds: float,
+    user_id: str = "default",
+    user_name: str = "",
+    session_users: dict[str, str] | None = None,
 ):
     if _is_unauthorized(api_key, authorization):
         return jsonify({"error": "Unauthorized"}), 401
@@ -347,13 +380,19 @@ async def post_chat_response(
     deep_research_enabled = bool(body.get("deep_research"))
 
     session_id = body.get("session_id") or secrets.token_urlsafe(16)
+    existing = session_id in sessions
+    # Can't post into another member's conversation.
+    if existing and not _owns_session(session_users, session_id, user_id):
+        return jsonify({"error": "Session not found"}), 404
     if prompt and on_session_start:
-        on_session_start(session_id)
+        on_session_start(session_id, user_id)
 
-    if session_id not in sessions:
+    if not existing:
         if tool_results:
             return jsonify({"error": "session_id is required for tool_results and must refer to an existing session"}), 400
-        sessions[session_id] = [{"role": "system", "content": load_system_prompt()}]
+        sessions[session_id] = [{"role": "system", "content": system_prompt_with_user(load_system_prompt(), user_name)}]
+        if session_users is not None:
+            session_users[session_id] = user_id
     messages = sessions[session_id]
     if prompt:
         # Per-message capability hints, requested by the UI shortcuts.

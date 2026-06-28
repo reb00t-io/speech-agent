@@ -3,6 +3,7 @@ import logging
 import hashlib
 import json
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -296,7 +297,24 @@ last_session_id: str | None = None
 # Retained for backward-compatible imports/fixtures; no longer drives behaviour
 # now that the user/dev mode distinction has been removed.
 session_modes: dict[str, str] = {}
+# Per-user separation: each household member sees only their own conversations.
+# last_session_ids: user_id -> their most recent session_id.
+# session_users:    session_id -> owning user_id.
 last_session_ids: dict[str, str] = {}
+session_users: dict[str, str] = {}
+
+DEFAULT_USER = "default"
+_USER_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _request_user() -> tuple[str, str]:
+    """(user_id, display_name) for the current request, from the X-User-Id /
+    X-User-Name headers the chat UI sends. Sanitised and bounded. This is
+    cooperative identification within the already-authenticated household — the
+    hub gates who reaches the chat — not a cryptographic boundary."""
+    uid = _USER_ID_RE.sub("", (request.headers.get("X-User-Id") or "").strip())[:64] or DEFAULT_USER
+    name = (request.headers.get("X-User-Name") or "").strip()[:80]
+    return uid, name
 
 
 def _load_sessions() -> None:
@@ -306,7 +324,10 @@ def _load_sessions() -> None:
             data = json.loads(SESSIONS_PATH.read_text())
             if "_meta" in data:
                 sessions.update(data.get("sessions", {}))
-                last_session_id = data["_meta"].get("last_session_id")
+                meta = data["_meta"]
+                last_session_id = meta.get("last_session_id")
+                last_session_ids.update(meta.get("last_session_ids", {}))
+                session_users.update(meta.get("session_users", {}))
             else:
                 sessions.update(data)  # backwards compat with old format
         except Exception:
@@ -318,7 +339,11 @@ def _save_sessions() -> None:
     SESSIONS_PATH.write_text(
         json.dumps(
             {
-                "_meta": {"last_session_id": last_session_id},
+                "_meta": {
+                    "last_session_id": last_session_id,
+                    "last_session_ids": last_session_ids,
+                    "session_users": session_users,
+                },
                 "sessions": sessions,
             },
             ensure_ascii=False,
@@ -327,9 +352,11 @@ def _save_sessions() -> None:
     )
 
 
-def _on_session_start(session_id: str) -> None:
+def _on_session_start(session_id: str, user_id: str = DEFAULT_USER) -> None:
     global last_session_id
     last_session_id = session_id
+    last_session_ids[user_id] = session_id
+    session_users[session_id] = user_id
     _save_sessions()
 
 
@@ -398,7 +425,8 @@ async def index():
 async def get_latest_session():
     if API_KEY and request.headers.get("Authorization", "") != f"Bearer {API_KEY}":
         return jsonify({"error": "Unauthorized"}), 401
-    latest_session_id = last_session_id
+    user_id, _ = _request_user()
+    latest_session_id = last_session_ids.get(user_id)
     if not latest_session_id or latest_session_id not in sessions:
         return jsonify({"session_id": None, "messages": []})
     return jsonify({
@@ -409,17 +437,21 @@ async def get_latest_session():
 
 @app.route("/v1/responses/<session_id>", methods=["GET"])
 async def get_session(session_id: str):
+    user_id, _ = _request_user()
     return await get_session_response(
         session_id=session_id,
         sessions=sessions,
         api_key=API_KEY,
         authorization=request.headers.get("Authorization", ""),
+        user_id=user_id,
+        session_users=session_users,
     )
 
 
 @app.route("/v1/responses", methods=["POST"])
 async def chat_responses():
     body = await request.get_json(force=True)
+    user_id, user_name = _request_user()
     return await post_chat_response(
         body=body,
         sessions=sessions,
@@ -430,6 +462,9 @@ async def chat_responses():
         on_session_start=_on_session_start,
         tools=get_tools(),
         stream_pace_seconds=STREAM_PACE_SECONDS,
+        user_id=user_id,
+        user_name=user_name,
+        session_users=session_users,
     )
 
 
@@ -478,6 +513,7 @@ async def ws_speech():
         load_system_prompt=_load_system_prompt,
         save_sessions=_save_sessions,
         on_session_start=_on_session_start,
+        session_users=session_users,
     )
 
 
