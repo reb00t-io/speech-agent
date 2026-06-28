@@ -13,11 +13,12 @@ from typing import Any
 import aiohttp
 
 try:
-    from . import plugins as _plugins
+    from . import memory, plugins as _plugins
     from .documents import publish_markdown
     from .runtime_logs import get_backend_logs, normalize_log_limit
     from .web_tools import fetch_url, normalize_max_chars, normalize_max_results, web_search
 except ImportError:
+    import memory
     import plugins as _plugins
     from documents import publish_markdown
     from runtime_logs import get_backend_logs, normalize_log_limit
@@ -171,6 +172,12 @@ async def execute_tool_call(session: aiohttp.ClientSession, tool_call: dict[str,
         return {"error": f"Invalid tool arguments for {fn_name}: {exc}"}
 
     fn_args.pop("user_message", None)
+
+    if fn_name == "recall":
+        # Long-term memory lookup, served by the memorizer Qdrant store. The store
+        # is synchronous (requests/Qdrant), so run it off the event loop.
+        content = await asyncio.to_thread(memory.recall, fn_args)
+        return {"result": content}
 
     if fn_name == "web_search":
         query = str(fn_args.get("query") or "").strip()

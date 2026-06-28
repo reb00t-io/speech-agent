@@ -8,9 +8,14 @@ import src.memory as memory  # noqa: E402
 
 
 def _fresh(tmp_path):
-    memory._model = None
+    memory.reset_model()
     memory.DATA_DIR = str(tmp_path / "mem")
     memory.ENABLED = True
+    # These tests exercise the Context (inject/recall sections), not the Qdrant
+    # retrieval store; keep it off so the in-process reload test can reopen the
+    # same data_dir without contending on the local Qdrant directory lock.
+    memory.STORE_ENABLED = False
+    memory.ORG_ENABLED = False
 
 
 def test_disabled_is_noop(tmp_path, monkeypatch):
@@ -58,11 +63,50 @@ def test_recall_reads_all_sections(tmp_path):
     assert "Marko" in blob and "coffee" in blob and "Pixel" in blob
 
 
+def test_recall_tool_schema_gating(monkeypatch):
+    monkeypatch.setattr(memory, "ENABLED", True)
+    monkeypatch.setattr(memory, "STORE_ENABLED", True)
+    schema = memory.recall_tool_schema()
+    assert schema and schema["function"]["name"] == "recall"
+
+    monkeypatch.setattr(memory, "STORE_ENABLED", False)
+    assert memory.recall_tool_schema() is None
+    monkeypatch.setattr(memory, "STORE_ENABLED", True)
+    monkeypatch.setattr(memory, "ENABLED", False)
+    assert memory.recall_tool_schema() is None
+
+
+def test_recall_executes_query_against_store(monkeypatch):
+    from memorizer.store.qdrant_store import MemoryHit
+
+    class FakeStore:
+        def search(self, query, *, limit=5, member_id=None, role=None):
+            return [MemoryHit(short_id="m1", kind="episode", scope="agent",
+                              text=f"hit for {query}")]
+
+    class FakeModel:
+        memory = FakeStore()
+        org_memory = None
+        member_id = None
+        role = None
+        recall_limit = 5
+
+    monkeypatch.setattr(memory, "ENABLED", True)
+    monkeypatch.setattr(memory, "_model", FakeModel())
+    out = memory.recall({"query": "coffee"})
+    assert "hit for coffee" in out and "[m1]" in out
+
+
+def test_recall_disabled_returns_unavailable(monkeypatch):
+    monkeypatch.setattr(memory, "ENABLED", False)
+    assert memory.recall({"query": "x"}) == "Memory is not available."
+
+
 def test_persists_across_reload(tmp_path):
     _fresh(tmp_path)
     memory._get().context.long_term_factual.append("memory", "Remembered fact 42.")
     memory._get().context.working.append("user", "favourite tea is genmaicha")
     # simulate a restart: drop the in-memory model, rebuild from the same data_dir
-    memory._model = None
+    memory.reset_model()
     blob = _recall_blob()
     assert "Remembered fact 42." in blob and "genmaicha" in blob

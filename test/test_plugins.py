@@ -85,6 +85,35 @@ async def test_execute_tool_call_dispatches_to_plugin(monkeypatch):
     assert seen == {"a": 1}
 
 
+async def test_execute_tool_call_dispatches_recall_to_memory(monkeypatch):
+    import src.tool_executor as tool_executor
+
+    seen = {}
+
+    def fake_recall(args):
+        seen.update(args)
+        return "Found 1 memory result(s):\n\n[m1] (episode)\nUser likes oat milk."
+
+    monkeypatch.setattr(tool_executor.memory, "recall", fake_recall)
+
+    out = await execute_tool_call(
+        None, {"function": {"name": "recall", "arguments": '{"query": "milk"}'}}
+    )
+    assert seen == {"query": "milk"}
+    assert "oat milk" in out["result"]
+
+
+def test_get_tools_includes_recall_when_store_enabled(monkeypatch):
+    import src.memory as memory
+
+    monkeypatch.setattr(memory, "ENABLED", True)
+    monkeypatch.setattr(memory, "STORE_ENABLED", True)
+    assert "recall" in {t["function"]["name"] for t in get_tools()}
+
+    monkeypatch.setattr(memory, "STORE_ENABLED", False)
+    assert "recall" not in {t["function"]["name"] for t in get_tools()}
+
+
 async def test_execute_tool_call_unknown_tool():
     out = await execute_tool_call(
         None, {"function": {"name": "nope", "arguments": "{}"}}

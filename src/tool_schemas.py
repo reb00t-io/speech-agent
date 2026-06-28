@@ -167,11 +167,16 @@ ALL_TOOLS = [
 def get_tools() -> list[dict]:
     """Return the full tool set available to the assistant.
 
-    This is the builtin (generic) tool set plus any tools contributed by
+    This is the builtin (generic) tool set, the memorizer ``recall`` tool (when
+    long-term memory + its store are enabled), plus any tools contributed by
     loaded plugins (see ``plugins.REGISTRY``).
     """
     try:
+        from . import memory
         from .plugins import REGISTRY
     except ImportError:
+        import memory
         from plugins import REGISTRY
-    return [*ALL_TOOLS, *REGISTRY.schemas]
+    recall_schema = memory.recall_tool_schema()
+    recall_tools = [recall_schema] if recall_schema else []
+    return [*ALL_TOOLS, *recall_tools, *REGISTRY.schemas]
